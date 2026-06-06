@@ -1,0 +1,6 @@
+{
+  "name": "약한영웅 : 학교 탈출",
+  "description": "야간 자율학습 중 봉쇄된 학교에서 추격하는 교사들을 피해 열쇠를 찾고 버튼을 가동하여 정문으로 탈출하는 1인칭 협동 탈출 게임입니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
