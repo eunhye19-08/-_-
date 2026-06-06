@@ -1033,48 +1033,8 @@ export default function App() {
 
       {/* 3. 30초 대기 또는 PLAYING/GAME_OVER 인게임 스튜디오 */}
       {(phase === GamePhase.READY_TIME || phase === GamePhase.PLAYING || phase === GamePhase.GAME_OVER) && (
-        <div className="min-h-screen bg-[#0c0d10] text-[#gray-200] p-4 md:p-6 flex flex-col justify-between select-none">
+        <div className="min-h-screen bg-[#0c0d10] text-[#gray-200] p-4 md:p-6 flex flex-col justify-[#between] select-none">
           
-          {/* 인게임 상단바 */}
-          <header className="flex flex-col sm:flex-row justify-between items-center bg-[#15171d] border border-gray-800 rounded-2xl px-6 py-4 shadow-lg mb-4">
-            <div className="text-center sm:text-left">
-              <span className="text-[9px] font-mono font-bold tracking-widest text-[#ef4444] block">
-                WEAK HERO : OUT OF SCHOOL
-              </span>
-              <h2 className="text-lg font-black text-white flex items-center justify-center sm:justify-start gap-1.5 mt-0.5 uppercase italic">
-                약한영웅 : <span className="text-red-600">학교 탈출</span>
-              </h2>
-            </div>
-
-            {/* 현재 제한/비상 가동 상태 바 표기 */}
-            <div className="flex items-center gap-3 mt-3 sm:mt-0 font-mono">
-              {phase === GamePhase.READY_TIME ? (
-                <div className="bg-red-950/60 border border-red-900 px-4 py-2 rounded-xl text-center flex items-center gap-2 animate-pulse">
-                  <span className="text-xs">⏱️</span>
-                  <span className="text-[11px] font-bold text-red-400 font-sans">
-                    교사 봉쇄 대기 시간: <strong>{readyCountdown}초</strong>
-                  </span>
-                </div>
-              ) : (
-                <div className="bg-[#1c1f26] border border-gray-800 px-4 py-1.5 rounded-xl text-xs flex items-center gap-1.5 font-semibold text-gray-400">
-                  <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-ping" />
-                  실시간 서버 상태 동적 연동
-                </div>
-              )}
-
-              <button
-                id="quit-setup-btn"
-                type="button"
-                onClick={() => setPhase(GamePhase.LOBBY)}
-                className="bg-[#252830] border border-gray-75 * border-gray-700 text-gray-400 hover:text-white font-bold px-3 py-2 rounded-xl text-xs transition flex items-center gap-1 cursor-pointer"
-                title="로비로 퇴각"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                나오기
-              </button>
-            </div>
-          </header>
-
           {/* 메인 어플리케이션 인터페이스 (정면 FPP 카메라 + 제어 상태 판넬) */}
           {phase !== GamePhase.GAME_OVER ? (
             <div className="flex-grow flex flex-col gap-4">
@@ -1095,6 +1055,7 @@ export default function App() {
                 eventLogs={eventLogs}
                 timeLeft={timeLeft}
                 gateOpenCountdown={gateOpenCountdown}
+                onExit={() => setPhase(GamePhase.LOBBY)}
               />
             </div>
           ) : (

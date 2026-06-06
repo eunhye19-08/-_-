@@ -164,31 +164,49 @@ export function castRay(
   };
 }
 
-// 충돌 감지 (W/S/A/D 이동 시 플레이어 벽 뚫기 방지)
+// 충돌 감지 (W/S/A/D 이동 시 플레이어 벽 뚫기 방지 및 부드러운 벽 미끄러짐 구현)
 export function checkCollision(
-  newX: number,
-  newY: number,
-  lockedDoors: { [key: string]: boolean },
-  gateUnlocked: boolean
+  p1: number,
+  p2: number,
+  p3: any,
+  p4: any,
+  p5?: any,
+  p6?: boolean
 ): { x: number; y: number; collided: boolean } {
-  // 여유 마진 (플레이어 크기)
+  let oldX: number;
+  let oldY: number;
+  let newX: number;
+  let newY: number;
+  let lockedDoors: { [key: string]: boolean };
+  let gateUnlocked: boolean;
+  const is6Args = typeof p5 !== "undefined";
+
+  if (is6Args) {
+    oldX = p1;
+    oldY = p2;
+    newX = p3;
+    newY = p4;
+    lockedDoors = p5 || {};
+    gateUnlocked = !!p6;
+  } else {
+    // Legacy 4-parameter call: checkCollision(newX, newY, lockedDoors, gateUnlocked)
+    oldX = p1;
+    oldY = p2;
+    newX = p1;
+    newY = p2;
+    lockedDoors = p3 || {};
+    gateUnlocked = !!p4;
+  }
+
+  // 여유 마진 (플레이어 캐릭터의 물리 반경)
   const margin = 0.22;
-  const testPoints = [
-    { x: newX - margin, y: newY - margin },
-    { x: newX + margin, y: newY - margin },
-    { x: newX - margin, y: newY + margin },
-    { x: newX + margin, y: newY + margin },
-  ];
 
-  let collided = false;
-
-  for (const pt of testPoints) {
-    const gridX = Math.floor(pt.x);
-    const gridY = Math.floor(pt.y);
+  const isBlocked = (x: number, y: number): boolean => {
+    const gridX = Math.floor(x);
+    const gridY = Math.floor(y);
 
     if (gridX < 0 || gridX >= MAP_WIDTH || gridY < 0 || gridY >= MAP_HEIGHT) {
-      collided = true;
-      break;
+      return true;
     }
 
     const cell = SCHOOL_MAP[gridY][gridX];
@@ -197,27 +215,58 @@ export function checkCollision(
         // 문 잠금 체크
         const cls = CLASSROOMS.find((c) => c.doorX === gridX && c.doorY === gridY);
         if (cls && lockedDoors[cls.color]) {
-          collided = true;
-          break;
+          return true;
         }
       } else if (cell === 3) {
         // 정문봉쇄 체크
         if (!gateUnlocked) {
-          collided = true;
-          break;
+          return true;
         }
       } else {
-        collided = true;
-        break;
+        return true;
       }
     }
+    return false;
+  };
+
+  const checkPointBlocked = (px: number, py: number): boolean => {
+    return (
+      isBlocked(px - margin, py - margin) ||
+      isBlocked(px + margin, py - margin) ||
+      isBlocked(px - margin, py + margin) ||
+      isBlocked(px + margin, py + margin)
+    );
+  };
+
+  if (!is6Args) {
+    // 레거시 스냅핑 복귀 모드 (AI 넉백/추적용)
+    const collided = checkPointBlocked(newX, newY);
+    if (collided) {
+      return { x: Math.floor(newX) + 0.5, y: Math.floor(newY) + 0.5, collided: true };
+    }
+    return { x: newX, y: newY, collided: false };
   }
 
-  if (collided) {
-    return { x: Math.floor(newX) + 0.5, y: Math.floor(newY) + 0.5, collided: true }; 
+  // 6선 신규 슬라이딩 알고리즘
+  let finalX = oldX;
+  let finalY = oldY;
+  let collided = false;
+
+  // 1. X축 단독 가상 이동 시뮬레이션
+  if (!checkPointBlocked(newX, oldY)) {
+    finalX = newX;
+  } else {
+    collided = true;
   }
 
-  return { x: newX, y: newY, collided: false };
+  // 2. Y축 단독 가상 이동 시뮬레이션
+  if (!checkPointBlocked(finalX, newY)) {
+    finalY = newY;
+  } else {
+    collided = true;
+  }
+
+  return { x: finalX, y: finalY, collided };
 }
 
 // 두 지점 간의 거리 계산

@@ -6,7 +6,7 @@
 import React, { useRef, useEffect, useState } from "react";
 import { Player, KeyItem, LockDoor, KeyColor, GamePhase, GameEventLog } from "../types";
 import { MAP_WIDTH, MAP_HEIGHT, SCHOOL_MAP, CLASSROOMS, castRay, getDistance, checkCollision } from "../utils/map";
-import { Shield, Sparkles, Navigation, RotateCcw, HelpCircle, Footprints, MessageSquare } from "lucide-react";
+import { Shield, Sparkles, Navigation, RotateCcw, HelpCircle, Footprints, MessageSquare, LogOut, Zap } from "lucide-react";
 import { STUDENT_CHARACTERS, TEACHER_CHARACTERS } from "./MainLobby";
 
 interface FirstPersonCanvasProps {
@@ -25,6 +25,7 @@ interface FirstPersonCanvasProps {
   eventLogs: GameEventLog[];
   timeLeft: number;
   gateOpenCountdown: number | null;
+  onExit?: () => void; // 나오기 콜백 추가
 }
 
 export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
@@ -43,6 +44,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
   eventLogs,
   timeLeft,
   gateOpenCountdown,
+  onExit,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const minimapRef = useRef<HTMLCanvasElement>(null);
@@ -136,7 +138,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
   useEffect(() => {
     const normalizeKey = (keyString: string): string => {
       const k = keyString.toLowerCase();
-      if (k === "ㅈ") return "w";
+      if (k === "ㅈ" || k === "ㅉ") return "w";
       if (k === "ㄴ") return "s";
       if (k === "ㅁ") return "a";
       if (k === "ㅇ") return "d";
@@ -145,14 +147,29 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
       return k;
     };
 
+    const getUnifiedKey = (e: KeyboardEvent): string => {
+      const code = e.code;
+      if (code === "KeyW" || code === "ArrowUp") return "w";
+      if (code === "KeyS" || code === "ArrowDown") return "s";
+      if (code === "KeyA") return "a";
+      if (code === "KeyD") return "d";
+      if (code === "KeyE") return "e";
+      if (code === "KeyF") return "f";
+      if (code === "ArrowLeft") return "arrowleft";
+      if (code === "ArrowRight") return "arrowright";
+      
+      const rawK = e.key.toLowerCase();
+      return normalizeKey(rawK);
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
 
-      const rawK = e.key.toLowerCase();
-      const k = normalizeKey(rawK);
+      const k = getUnifiedKey(e);
       keysPressed.current[k] = true;
-      keysPressed.current[rawK] = true; // 백업으로 원래 키도 세팅
+      if (k === "w") keysPressed.current["arrowup"] = true;
+      if (k === "s") keysPressed.current["arrowdown"] = true;
 
       const currPlayer = playerRef.current;
       // 상호작용 단축키 E (수동 작동 목적)
@@ -166,10 +183,10 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      const rawK = e.key.toLowerCase();
-      const k = normalizeKey(rawK);
+      const k = getUnifiedKey(e);
       keysPressed.current[k] = false;
-      keysPressed.current[rawK] = false;
+      if (k === "w") keysPressed.current["arrowup"] = false;
+      if (k === "s") keysPressed.current["arrowdown"] = false;
       onMoveRef.current(localX.current, localY.current, localAngle.current);
     };
 
@@ -248,8 +265,10 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
           // 정문 오픈 상태
           const allButtonsPressed = currDoors.every((d) => d.buttonPressed);
 
-          // 충돌 계산
+          // 충돌 계산 (6선 슬라이딩 연산 대행)
           const colResult = checkCollision(
+            localX.current,
+            localY.current,
             localX.current + dx,
             localY.current + dy,
             lockedDoorsState,
@@ -382,7 +401,14 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
       doors.forEach((d) => {
         lockedDoorsState[d.color] = d.isLocked;
       });
-      const colResult = checkCollision(localX.current + dx, localY.current + dy, lockedDoorsState, doors.every(d => d.buttonPressed));
+      const colResult = checkCollision(
+        localX.current,
+        localY.current,
+        localX.current + dx,
+        localY.current + dy,
+        lockedDoorsState,
+        doors.every((d) => d.buttonPressed)
+      );
       nextX = colResult.x;
       nextY = colResult.y;
     }
@@ -787,31 +813,35 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
         c.rotate(swingAngle * 0.18);
       }
       
-      // 기저 머리 피부블록
-      drawRobloxBox(c, -headW / 2, -headH / 2, headW, headH, headD, "#fdba74", charImg);
+      // 기저 머리 렌더링. 사용자가 올린 오리지널 이미지가 있을 경우 변형/왜곡/머리 덮개 없이 원본 그대로 노출, 없을 경우에만 레고/로블록스형 블록머리로 폴백.
+      if (charImg && charImg.complete && charImg.width > 0) {
+        c.drawImage(charImg, -headW / 2, -headH / 2, headW, headH);
+      } else {
+        drawRobloxBox(c, -headW / 2, -headH / 2, headW, headH, headD, "#fdba74");
 
-      // 캐릭터 고유 헤어 블록 & 귀여운 액세서리 3D블록 장식
-      let hairColor = "#475569";
-      if (roleName === "연시은") hairColor = "#334155";
-      else if (roleName === "박후민") hairColor = "#78350f";
-      else if (roleName === "안수호") hairColor = "#eab308";
-      else if (roleName === "금성제") hairColor = "#dc2626";
-      else if (roleName === "고현탁") hairColor = "#1e293b";
-      else if (team === "TEACHER") hairColor = "#0f172a";
+        // 캐릭터 고유 헤어 블록 & 귀여운 액세서리 3D블록 장식
+        let hairColor = "#475569";
+        if (roleName === "연시은") hairColor = "#334155";
+        else if (roleName === "박후민") hairColor = "#78350f";
+        else if (roleName === "안수호") hairColor = "#eab308";
+        else if (roleName === "금성제") hairColor = "#dc2626";
+        else if (roleName === "고현탁") hairColor = "#1e293b";
+        else if (team === "TEACHER") hairColor = "#0f172a";
 
-      // 앞머리 (Top hair block) 과 옆머리(Sides) 복스화
-      drawRobloxBox(c, -headW * 0.53, -headH * 0.62, headW * 1.06, headH * 0.20, headD * 1.1, hairColor);
-      drawRobloxBox(c, -headW * 0.55, -headH * 0.45, headW * 0.15, headH * 0.70, headD * 1.05, hairColor);
-      drawRobloxBox(c, headW * 0.40, -headH * 0.45, headW * 0.15, headH * 0.70, headD * 1.05, hairColor);
+        // 앞머리 (Top hair block) 과 옆머리(Sides) 복스화
+        drawRobloxBox(c, -headW * 0.53, -headH * 0.62, headW * 1.06, headH * 0.20, headD * 1.1, hairColor);
+        drawRobloxBox(c, -headW * 0.55, -headH * 0.45, headW * 0.15, headH * 0.70, headD * 1.05, hairColor);
+        drawRobloxBox(c, headW * 0.40, -headH * 0.45, headW * 0.15, headH * 0.70, headD * 1.05, hairColor);
 
-      // 안경 등 세부 기믹
-      if (roleName === "연시은" || team === "TEACHER") {
-        c.strokeStyle = "rgba(255, 255, 255, 0.9)";
-        c.lineWidth = 1.8;
-        c.beginPath();
-        c.arc(-headW * 0.22, 0, headW * 0.18, 0, 2 * Math.PI);
-        c.arc(headW * 0.22, 0, headW * 0.18, 0, 2 * Math.PI);
-        c.stroke();
+        // 안경 등 세부 기믹
+        if (roleName === "연시은" || team === "TEACHER") {
+          c.strokeStyle = "rgba(255, 255, 255, 0.9)";
+          c.lineWidth = 1.8;
+          c.beginPath();
+          c.arc(-headW * 0.22, 0, headW * 0.18, 0, 2 * Math.PI);
+          c.arc(headW * 0.22, 0, headW * 0.18, 0, 2 * Math.PI);
+          c.stroke();
+        }
       }
 
       // 엔젤 안수호 소박한 입체 헤일로(광배 링) 장치
@@ -823,8 +853,10 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
         c.scale(1.2, 0.35);
         c.beginPath();
         c.arc(0, 0, headW * 0.45, 0, 2 * Math.PI);
-        ctx.shadowColor = "rgba(253, 224, 71, 0.8)";
-        ctx.shadowBlur = 6;
+        if (typeof (c as any).shadowColor !== "undefined") {
+          (c as any).shadowColor = "rgba(253, 224, 71, 0.8)";
+          (c as any).shadowBlur = 6;
+        }
         c.stroke();
         c.restore();
       }
@@ -916,6 +948,9 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
       // 각도 노말라이즈
       spriteAngle = Math.atan2(Math.sin(spriteAngle), Math.cos(spriteAngle));
 
+      // 정사영 부드러운 벽 가림 보정 깊이 계산
+      const correctedSprDist = spr.dist * Math.cos(spriteAngle);
+
       // 화면 내부(FOV 60도 안)에 속했는지 체크
       if (Math.abs(spriteAngle) < fov * 0.9) {
         // 스크린 자이로 가로 위치
@@ -944,7 +979,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
             // 중심 뿐만이 아니라 약간 좌우 마진을 두어 벽 통과 잔여 픽셀 완벽 가림
             const checkX1 = Math.max(0, spriteScreenX - 5);
             const checkX2 = Math.min(w - 1, spriteScreenX + 5);
-            if (depthBuffer[spriteScreenX] < spr.dist && depthBuffer[checkX1] < spr.dist && depthBuffer[checkX2] < spr.dist) {
+            if (depthBuffer[spriteScreenX] < correctedSprDist && depthBuffer[checkX1] < correctedSprDist && depthBuffer[checkX2] < correctedSprDist) {
               return; // 전면 벽에 완벽하게 차폐된 경우 렌더링 스킵!
             }
           }
@@ -1044,7 +1079,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
             const stripeX = Math.floor(targetScreenX + col);
             if (stripeX >= 0 && stripeX < w) {
               // 오프스크린의 세로줄이 벽 깊이보다 앞쪽에 있는 경우에만 메인 캔버스에 카피 전송!
-              if (depthBuffer[stripeX] >= spr.dist - 0.1) {
+              if (depthBuffer[stripeX] >= correctedSprDist - 0.1) {
                 ctx.drawImage(
                   offCanvas,
                   col,
@@ -1067,7 +1102,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
           let visibleHits = 0;
           testCols.forEach((tc) => {
             if (tc >= 0 && tc < w) {
-              if (depthBuffer[tc] >= spr.dist - 0.05) visibleHits++;
+              if (depthBuffer[tc] >= correctedSprDist - 0.05) visibleHits++;
             }
           });
           if (visibleHits === 0) return; // 벽 뒤에 존재하므로 생략
@@ -1295,25 +1330,131 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
   };
 
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col gap-4 shadow-2xl relative">
+    <div className="w-full h-full min-h-[500px] flex-grow flex flex-col bg-black rounded-2xl overflow-hidden border border-slate-800 shadow-2xl relative justify-center items-center select-none">
       
-      {/* 타이틀 및 가이드 전환 */}
-      <div className="flex justify-between items-center bg-slate-950 px-4 py-2 border border-slate-800 rounded-xl">
-        <div className="flex items-center gap-2">
-          <Sparkles className="w-4 h-4 text-amber-500 animate-pulse" />
-          <span className="text-[11px] font-mono font-bold text-white tracking-widest uppercase">
-            1인칭 학교 내부 탈출 3D 뷰어
+      {/* 극적 일원화 탑바 HUD 오버레이 */}
+      <div className="absolute top-4 left-4 right-4 z-35 flex flex-col sm:flex-row justify-between items-center bg-[#07090e]/92 backdrop-blur-md border border-slate-800/90 rounded-xl px-4 py-2.5 shadow-xl gap-2 pointer-events-auto">
+        {/* 타이틀 및 나오기 */}
+        <div className="flex items-center gap-3">
+          <span className="text-[10px] font-black tracking-widest text-red-500 font-sans italic uppercase">
+            🏫 WEAK HERO ESCAPE
           </span>
+          {onExit && (
+            <button
+              id="canvas-exit-lobby-btn"
+              type="button"
+              onClick={onExit}
+              className="bg-slate-900 border border-slate-800 hover:bg-slate-800 hover:text-white text-slate-300 font-mono text-[9px] font-bold px-2.5 py-1 rounded-lg transition flex items-center gap-1 cursor-pointer"
+              title="로비로 퇴각"
+            >
+              <LogOut className="w-3 h-3" />
+              나오기
+            </button>
+          )}
+        </div>
+
+        {/* 교문 봉쇄 해제 상태 (Lockdown buttons list) */}
+        <div className="hidden lg:flex items-center gap-2">
+          <span className="text-[9px] font-mono text-slate-400 font-bold uppercase tracking-wider">
+            교문 봉쇄 해제 상태:
+          </span>
+          <div className="flex items-center gap-1.5">
+            {doors.map((d) => {
+              let badgeStyle = "bg-red-950/40 text-red-400 border-red-900/60";
+              let lightIndicator = "○";
+              if (d.buttonPressed) {
+                badgeStyle = "bg-green-950/80 text-green-400 border-green-800 animate-pulse";
+                lightIndicator = "●";
+              } else if (!d.isLocked) {
+                badgeStyle = "bg-blue-950/50 text-blue-400 border-blue-900";
+                lightIndicator = "🔓";
+              }
+              
+              let dotEmoji = "🟥";
+              if (d.color === "BLUE") dotEmoji = "🟦";
+              else if (d.color === "YELLOW") dotEmoji = "🟨";
+              else if (d.color === "GREEN") dotEmoji = "🟩";
+              else if (d.color === "PURPLE") dotEmoji = "🟪";
+
+              return (
+                <div
+                  key={d.color}
+                  className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded border flex items-center gap-1 cursor-help ${badgeStyle}`}
+                  title={`${d.classroomName}: ${d.isLocked ? "잠겨있음" : d.buttonPressed ? "버튼 연동 완료 (활성)" : "열림(버튼 대기)"}`}
+                >
+                  <span>{dotEmoji}</span>
+                  <span className="text-[8px]">{d.classroomName}</span>
+                  <span className="text-[7px]">{lightIndicator}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 타이머 및 정문개방 표식 */}
+        <div className="flex items-center gap-3 font-mono">
+          {phase === "READY_TIME" ? (
+            <div className="bg-red-950/80 border border-red-800 px-3 py-1 rounded-lg flex items-center gap-1.5 animate-pulse">
+              <span className="text-[10px] font-sans font-bold text-red-400">
+                ⚠️ 교사 이동대기: <strong>{readyCountdown}초</strong>
+              </span>
+            </div>
+          ) : (
+            <div className="bg-slate-900 border border-slate-850 px-3 py-1 rounded-lg flex items-center gap-1.5 font-mono">
+              <span className="text-[10px] font-bold text-emerald-400 whitespace-nowrap">
+                ⏳ 탈출 시간: <strong>{Math.floor(timeLeft / 60)}분 {timeLeft % 60}초</strong>
+              </span>
+            </div>
+          )}
+          {gateOpenCountdown !== null && (
+            <div className="bg-amber-950/90 border border-amber-800 px-3 py-1 rounded-lg text-[10px] font-black text-amber-300 animate-bounce">
+              🚪 정문개방: {gateOpenCountdown}s
+            </div>
+          )}
         </div>
       </div>
 
-      {/* 메인 뷰포트 레이아웃 분할 */}
-      <div className="flex flex-col md:flex-row gap-4">
-        
-        {/* 좌측: 3D POV Rendering Canvas */}
-        <div className="flex-grow flex flex-col bg-black rounded-xl overflow-hidden border border-slate-950 shadow-inner relative justify-center items-center">
-          
-          <canvas
+      {/* 능력 버튼 (Skill slot activation HUD) */}
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-35 flex flex-col items-center pointer-events-auto select-none">
+        <button
+          id="hud-skill-slot"
+          type="button"
+          onClick={() => {
+            onUseSkill();
+          }}
+          disabled={(player.cooldowns["MAIN"] || 0) > 0 || player.isCaptured || player.hasEscaped}
+          className={`px-4 py-1.5 border rounded-xl flex flex-col items-center gap-0.5 shadow-2xl transition duration-150 active:scale-95 cursor-pointer max-w-[200px] text-center ${
+            (player.cooldowns["MAIN"] || 0) > 0
+              ? "bg-slate-900/90 border-slate-800 text-slate-500"
+              : "bg-blue-950/90 hover:bg-blue-900/90 border-blue-600 text-blue-200 shadow-[0_0_15px_rgba(29,78,216,0.5)] animate-pulse"
+          }`}
+        >
+          <div className="flex items-center gap-1">
+            <Zap className={`w-3.5 h-3.5 ${(player.cooldowns["MAIN"] || 0) > 0 ? "text-slate-500" : "text-amber-400"}`} />
+            <span className="text-[9px] uppercase font-mono font-black tracking-widest whitespace-nowrap">
+              능력 사용 단축키 [F]
+            </span>
+          </div>
+          <span className="text-[10px] font-sans font-bold whitespace-nowrap overflow-hidden text-ellipsis w-40 text-slate-200">
+            {player.role === "연시은" ? "볼펜 역습 (보디가드)" : 
+             player.role === "박후민" ? "불도저 일격 (넉코)" : 
+             player.role === "금성제" ? "쇠파이프 기습 (패닉)" : 
+             player.role === "안수호" ? "즉각 구출 (수호방패)" : 
+             player.team === "TEACHER" ? "락다운 기믹 작동" : "고유 전술"}
+          </span>
+          {(player.cooldowns["MAIN"] || 0) > 0 ? (
+            <span className="text-[8px] font-mono text-slate-400">
+              ⏱️ 대기시간: {player.cooldowns["MAIN"]}초
+            </span>
+          ) : (
+            <span className="text-[8px] font-mono text-blue-400 font-bold">
+              ⚡ READY (F키 / 클릭)
+            </span>
+          )}
+        </button>
+      </div>
+
+      <canvas
             id="fpp-canvas-3d"
             ref={canvasRef}
             width={960}
@@ -1414,7 +1555,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
           </div>
 
           {/* 조작 가이드 HUD Overlay */}
-          <div className="absolute top-4 left-4 z-20 bg-slate-950/85 backdrop-blur-md border border-slate-800/80 rounded-xl p-3 max-w-[240px] shadow-lg pointer-events-auto select-none font-sans text-left transition-all duration-300">
+          <div className="absolute top-[76px] left-4 z-20 bg-slate-950/85 backdrop-blur-md border border-slate-800/80 rounded-xl p-3 max-w-[240px] shadow-lg pointer-events-auto select-none font-sans text-left transition-all duration-300">
             <div className="flex items-center gap-1.5 border-b border-slate-850 border-slate-800 pb-1.5 mb-1.5 justify-between">
               <span className="text-[10px] font-bold text-blue-400 font-mono tracking-wider uppercase flex items-center gap-1">
                 <Footprints className="w-3.5 h-3.5" />
@@ -1454,7 +1595,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
           </div>
 
           {/* 실시간 채팅 및 뉴스피드 HUD Overlay */}
-          <div className="absolute top-4 right-4 z-20 bg-slate-950/85 backdrop-blur-md border border-slate-800/80 rounded-xl p-3 w-64 sm:w-72 shadow-lg pointer-events-auto select-none flex flex-col max-h-40 md:max-h-48 text-left transition-all duration-300">
+          <div className="absolute top-[76px] right-4 z-20 bg-slate-950/85 backdrop-blur-md border border-slate-800/80 rounded-xl p-3 w-64 sm:w-72 shadow-lg pointer-events-auto select-none flex flex-col max-h-40 md:max-h-48 text-left transition-all duration-300">
             <div className="flex justify-between items-center border-b border-slate-800 pb-1.5 mb-1.5">
               <span className="text-[10px] font-bold text-green-400 font-mono tracking-wider uppercase flex items-center gap-1.5">
                 <MessageSquare className="w-3.5 h-3.5 text-green-400" />
@@ -1583,10 +1724,6 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
               </p>
             </div>
           )}
-        </div>
-
-      </div>
-
     </div>
   );
 };
