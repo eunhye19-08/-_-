@@ -6,8 +6,11 @@
 import express from "express";
 import path from "path";
 import cors from "cors";
+import crypto from "crypto";
+import fs from "fs";
 import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
+import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 const PORT = 3000;
@@ -15,7 +18,102 @@ const PORT = 3000;
 app.use(cors());
 app.use(express.json());
 
-// Gemini SDK 지연 초기화 및 안전한 키 탐색
+// ==========================================
+// DB SERVICE (Supabase + Local fallback)
+// ==========================================
+let supabase: any = null;
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+
+const isUrlValid = supabaseUrl && (supabaseUrl.startsWith("http://") || supabaseUrl.startsWith("https://"));
+
+if (isUrlValid && supabaseKey && supabaseUrl !== "YOUR_SUPABASE_URL" && supabaseKey !== "YOUR_SUPABASE_KEY") {
+  try {
+    supabase = createClient(supabaseUrl!, supabaseKey);
+    console.log("[Supabase] Client initialized successfully!");
+  } catch (err) {
+    console.error("[Supabase] Failed to initialize client:", err);
+  }
+} else {
+  console.log("[Supabase] SUPABASE_URL or SUPABASE_KEY missing or invalid. Using transparent local JSON DB (profiles_db.json) for Auth & Profiles.");
+}
+
+const LOCAL_DB_PATH = path.join(process.cwd(), "profiles_db.json");
+
+function readLocalDb() {
+  if (!fs.existsSync(LOCAL_DB_PATH)) {
+    fs.writeFileSync(LOCAL_DB_PATH, JSON.stringify({ users: {}, friends: {} }, null, 2));
+  }
+  try {
+    return JSON.parse(fs.readFileSync(LOCAL_DB_PATH, "utf-8"));
+  } catch (e) {
+    return { users: {}, friends: {} };
+  }
+}
+
+function writeLocalDb(data: any) {
+  try {
+    fs.writeFileSync(LOCAL_DB_PATH, JSON.stringify(data, null, 2));
+  } catch (err) {
+    console.error("[LocalDB] Write error:", err);
+  }
+}
+
+function hashPassword(password: string): string {
+  return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+// Helper to handle Supabase DB calls with defensive fallback to local JSON DB
+async function runDbOp<T>(supabaseOp: () => Promise<T>, localOp: () => T): Promise<T> {
+  if (supabase) {
+    try {
+      return await supabaseOp();
+    } catch (err: any) {
+      console.warn("[DB] Supabase call failed. Falling back to local database. Error:", err.message || err);
+      return localOp();
+    }
+  }
+  return localOp();
+}
+
+// ==========================================
+// IN-MEMORY MULTIPLAYER ROOM STORE
+// ==========================================
+interface Room {
+  code: string;
+  lobbyMode: "SOLO" | "INVITE";
+  teacherCount: number;
+  timeLimit: number;
+  phase: string;
+  hostId: string;
+  players: { [id: string]: any }; // id is username
+  bots: any[];
+  keys: any[];
+  doors: any[];
+  eventLogs: any[];
+  timeLeft: number;
+  gateOpenCountdown: number | null;
+  readyCountdown: number;
+  lastUpdated: number;
+}
+
+const rooms: { [code: string]: Room } = {};
+
+// Clean up dead rooms periodically (runs every 10 mins)
+setInterval(() => {
+  const now = Date.now();
+  Object.keys(rooms).forEach((code) => {
+    if (now - rooms[code].lastUpdated > 30 * 60 * 100) { // 30 mins inactive
+      delete rooms[code];
+      console.log(`[Manager] Cleaned up inactive room: ${code}`);
+    }
+  });
+}, 10 * 60 * 1000);
+
+
+// ==========================================
+// GEMINI DIALOGUE / STORY CODES
+// ==========================================
 let aiClient: GoogleGenAI | null = null;
 
 function getGeminiClient(): GoogleGenAI | null {
@@ -37,6 +135,594 @@ function getGeminiClient(): GoogleGenAI | null {
   return aiClient;
 }
 
+
+// ==========================================
+// AUTH & PROFILE ENDPOINTS
+// ==========================================
+
+// 1. Register User Profile
+app.post("/api/auth/register", async (req, res) => {
+  const { username, password, nickname } = req.body;
+  if (!username || !password || !nickname) {
+    return res.status(400).json({ error: "아이디, 비밀번호, 닉네임은 필수입니다." });
+  }
+
+  const cleanUsername = username.trim().toLowerCase();
+  const cleanNickname = nickname.trim();
+
+  try {
+    const result = await runDbOp(
+      async () => {
+        // Query supabase
+        const { data: existing } = await supabase.from("profiles").select("username").eq("username", cleanUsername).maybeSingle();
+        if (existing) {
+          throw new Error("ALREADY_EXISTS");
+        }
+        
+        const payload = {
+          username: cleanUsername,
+          password_hash: hashPassword(password),
+          nickname: cleanNickname,
+          level: 1,
+          experience: 0,
+          coins: 0,
+          wins: 0,
+          escapes: 0,
+          arrests: 0,
+          games_played: 0,
+          title: "초보 탈출러",
+          skin: "기본"
+        };
+        const { error } = await supabase.from("profiles").insert(payload);
+        if (error) throw error;
+        return payload;
+      },
+      () => {
+        // Local fallback
+        const db = readLocalDb();
+        if (db.users[cleanUsername]) {
+          throw new Error("ALREADY_EXISTS");
+        }
+        const payload = {
+          username: cleanUsername,
+          password_hash: hashPassword(password),
+          nickname: cleanNickname,
+          level: 1,
+          experience: 0,
+          coins: 0,
+          wins: 0,
+          escapes: 0,
+          arrests: 0,
+          games_played: 0,
+          title: "초보 탈출러",
+          skin: "기본"
+        };
+        db.users[cleanUsername] = payload;
+        writeLocalDb(db);
+        return payload;
+      }
+    );
+
+    return res.json({ success: true, profile: result });
+  } catch (err: any) {
+    if (err.message === "ALREADY_EXISTS") {
+      return res.status(400).json({ error: "이미 가입 완료된 아이디입니다." });
+    }
+    console.error("Registration error:", err);
+    return res.status(500).json({ error: "가입 처리 중 오류 발생: " + err.message });
+  }
+});
+
+// 2. Login User Profile
+app.post("/api/auth/login", async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: "아이디와 비밀번호를 모두 입력하십시오." });
+  }
+
+  const cleanUsername = username.trim().toLowerCase();
+
+  try {
+    const result = await runDbOp(
+      async () => {
+        const { data, error } = await supabase.from("profiles").select("*").eq("username", cleanUsername).maybeSingle();
+        if (error) throw error;
+        if (!data) {
+          throw new Error("NOT_FOUND");
+        }
+        if (data.password_hash !== hashPassword(password)) {
+          throw new Error("WRONG_PASSWORD");
+        }
+        return data;
+      },
+      () => {
+        const db = readLocalDb();
+        const user = db.users[cleanUsername];
+        if (!user) {
+          throw new Error("NOT_FOUND");
+        }
+        if (user.password_hash !== hashPassword(password)) {
+          throw new Error("WRONG_PASSWORD");
+        }
+        return user;
+      }
+    );
+
+    return res.json({ success: true, profile: result });
+  } catch (err: any) {
+    if (err.message === "NOT_FOUND") {
+      return res.status(400).json({ error: "존재하지 않는 아이디입니다." });
+    }
+    if (err.message === "WRONG_PASSWORD") {
+      return res.status(400).json({ error: "비밀번호가 일치하지 않습니다." });
+    }
+    console.error("Login error:", err);
+    return res.status(500).json({ error: "로그인 중 서버 오류 발생" });
+  }
+});
+
+// 3. Get profile details (including win rate etc.)
+app.get("/api/profile/:username", async (req, res) => {
+  const cleanUsername = req.params.username.trim().toLowerCase();
+
+  try {
+    const profile = await runDbOp(
+      async () => {
+        const { data, error } = await supabase.from("profiles").select("*").eq("username", cleanUsername).maybeSingle();
+        if (error) throw error;
+        return data;
+      },
+      () => {
+        const db = readLocalDb();
+        return db.users[cleanUsername] || null;
+      }
+    );
+
+    if (!profile) {
+      return res.status(404).json({ error: "프로필을 찾을 수 없습니다." });
+    }
+
+    return res.json({ success: true, profile });
+  } catch (err) {
+    console.error("Get Profile error:", err);
+    return res.status(500).json({ error: "프로필 취득 실패" });
+  }
+});
+
+// 4. Update Profile stats after a game ends
+app.post("/api/profile/update", async (req, res) => {
+  const { username, winsUpdate, escapesUpdate, arrestsUpdate, coinsUpdate, xpUpdate } = req.body;
+  if (!username) {
+    return res.status(400).json({ error: "username 필수입니다." });
+  }
+
+  const cleanUsername = username.trim().toLowerCase();
+
+  try {
+    const updated = await runDbOp(
+      async () => {
+        const { data: current } = await supabase.from("profiles").select("*").eq("username", cleanUsername).single();
+        if (!current) throw new Error("NOT_FOUND");
+
+        const gamesPlayed = (current.games_played || 0) + 1;
+        const totalWins = (current.wins || 0) + (winsUpdate || 0);
+        const totalEscapes = (current.escapes || 0) + (escapesUpdate || 0);
+        const totalArrests = (current.arrests || 0) + (arrestsUpdate || 0);
+        const totalCoins = (current.coins || 0) + (coinsUpdate || 0);
+        const rawXp = (current.experience || 0) + (xpUpdate || 0);
+        
+        // Calculate dynamic level (100XP per level)
+        const newLevel = Math.floor(rawXp / 100) + 1;
+        
+        // Calculate Dynamic User Title based on statistics
+        let newTitle = current.title || "초보 탈출러";
+        if (totalEscapes >= 10) newTitle = "탈출 엘리트";
+        if (totalArrests >= 10) newTitle = "악몽의 주임교사";
+        if (totalWins >= 30) newTitle = "은장고 가디언";
+        if (totalWins >= 50) newTitle = "봉쇄 파괴자";
+
+        const updatePayload = {
+          wins: totalWins,
+          escapes: totalEscapes,
+          arrests: totalArrests,
+          coins: totalCoins,
+          experience: rawXp,
+          games_played: gamesPlayed,
+          level: newLevel,
+          title: newTitle
+        };
+
+        const { error } = await supabase.from("profiles").update(updatePayload).eq("username", cleanUsername);
+        if (error) throw error;
+        
+        return { username: cleanUsername, ...current, ...updatePayload };
+      },
+      () => {
+        const db = readLocalDb();
+        const current = db.users[cleanUsername];
+        if (!current) throw new Error("NOT_FOUND");
+
+        const gamesPlayed = (current.games_played || 0) + 1;
+        const totalWins = (current.wins || 0) + (winsUpdate || 0);
+        const totalEscapes = (current.escapes || 0) + (escapesUpdate || 0);
+        const totalArrests = (current.arrests || 0) + (arrestsUpdate || 0);
+        const totalCoins = (current.coins || 0) + (coinsUpdate || 0);
+        const rawXp = (current.experience || 0) + (xpUpdate || 0);
+        const newLevel = Math.floor(rawXp / 100) + 1;
+
+        let newTitle = current.title || "초보 탈출러";
+        if (totalEscapes >= 10) newTitle = "탈출 엘리트";
+        if (totalArrests >= 10) newTitle = "악몽의 주임교사";
+        if (totalWins >= 30) newTitle = "은장고 가디언";
+        if (totalWins >= 50) newTitle = "봉쇄 파괴자";
+
+        const updatePayload = {
+          wins: totalWins,
+          escapes: totalEscapes,
+          arrests: totalArrests,
+          coins: totalCoins,
+          experience: rawXp,
+          games_played: gamesPlayed,
+          level: newLevel,
+          title: newTitle
+        };
+
+        db.users[cleanUsername] = { ...current, ...updatePayload };
+        writeLocalDb(db);
+        return db.users[cleanUsername];
+      }
+    );
+
+    return res.json({ success: true, profile: updated });
+  } catch (err: any) {
+    console.error("Stats update error:", err);
+    return res.status(500).json({ error: "스탯 기록 연동 실패" });
+  }
+});
+
+// 5. Add Friend endpoint (친구 추가)
+app.post("/api/profile/add_friend", async (req, res) => {
+  const { username, friendUsername } = req.body;
+  if (!username || !friendUsername) {
+    return res.status(400).json({ error: "본인 아이디와 친구 신청자 아이디가 필요합니다." });
+  }
+
+  const u1 = username.trim().toLowerCase();
+  const u2 = friendUsername.trim().toLowerCase();
+
+  if (u1 === u2) {
+    return res.status(400).json({ error: "자기 자신은 구우 친구로 추가할 수 없습니다!" });
+  }
+
+  try {
+    const success = await runDbOp(
+      async () => {
+        // Check friend exists
+        const { data: fr } = await supabase.from("profiles").select("username").eq("username", u2).maybeSingle();
+        if (!fr) throw new Error("FRIEND_NOT_FOUND");
+
+        // Insert symmetric relations
+        const { error: err1 } = await supabase.from("friends").insert({ user_username: u1, friend_username: u2 });
+        // Fail silently on unique key violations (already friends)
+        return true;
+      },
+      () => {
+        const db = readLocalDb();
+        if (!db.users[u2]) {
+          throw new Error("FRIEND_NOT_FOUND");
+        }
+        
+        if (!db.friends[u1]) db.friends[u1] = [];
+        if (!db.friends[u2]) db.friends[u2] = [];
+
+        if (!db.friends[u1].includes(u2)) db.friends[u1].push(u2);
+        if (!db.friends[u2].includes(u1)) db.friends[u2].push(u1);
+
+        writeLocalDb(db);
+        return true;
+      }
+    );
+
+    return res.json({ success: true, message: `${friendUsername}님과 친구가 되었습니다!` });
+  } catch (err: any) {
+    if (err.message === "FRIEND_NOT_FOUND") {
+      return res.status(404).json({ error: "존재하지 않는 사용자 계정(ID)입니다." });
+    }
+    console.error("Friends link error:", err);
+    return res.json({ success: true, message: "이미 친구 상태이거나 연계 완료되었습니다." });
+  }
+});
+
+// 6. Get Friends List
+app.get("/api/profile/friends/:username", async (req, res) => {
+  const u1 = req.params.username.trim().toLowerCase();
+
+  try {
+    const list = await runDbOp(
+      async () => {
+        const { data, error } = await supabase.from("friends").select("friend_username").eq("user_username", u1);
+        if (error) throw error;
+        if (!data || data.length === 0) return [];
+
+        const usernames = data.map((f: any) => f.friend_username);
+        const { data: profiles, error: err2 } = await supabase.from("profiles").select("username, nickname, title, level, wins, escapes, arrests, games_played").in("username", usernames);
+        if (err2) throw err2;
+        return profiles || [];
+      },
+      () => {
+        const db = readLocalDb();
+        const friendsList = db.friends[u1] || [];
+        return friendsList.map((fName: string) => {
+          const profile = db.users[fName];
+          if (profile) {
+            return {
+              username: profile.username,
+              nickname: profile.nickname,
+              title: profile.title,
+              level: profile.level,
+              wins: profile.wins,
+              escapes: profile.escapes,
+              arrests: profile.arrests,
+              games_played: profile.games_played
+            };
+          }
+          return null;
+        }).filter(Boolean);
+      }
+    );
+
+    return res.json({ success: true, friends: list });
+  } catch (err) {
+    console.error("Get friends list error:", err);
+    return res.json({ success: true, friends: [] });
+  }
+});
+
+
+// ==========================================
+// ROOMS MULTIPLAYER CLUSTER ENDPOINTS
+// ==========================================
+
+// 1. Create Room (Host creates room)
+app.post("/api/rooms", (req, res) => {
+  const { code, hostId, hostNickname, studentRole, teacherRole, timeLimit, teacherCount, lobbyMode } = req.body;
+  
+  if (!code || !hostId) {
+    return res.status(400).json({ error: "room code and hostId are required." });
+  }
+
+  const upperCode = code.trim().toUpperCase();
+
+  // Initialize room state
+  rooms[upperCode] = {
+    code: upperCode,
+    lobbyMode: lobbyMode || "SOLO",
+    teacherCount: teacherCount || 1,
+    timeLimit: timeLimit || 300,
+    phase: "LOBBY",
+    hostId: hostId,
+    players: {
+      [hostId]: {
+        id: hostId,
+        username: hostId,
+        nickname: hostNickname,
+        isHost: true,
+        isAI: false,
+        team: null,
+        selectedStudentRole: studentRole,
+        selectedTeacherRole: teacherRole,
+        role: null,
+        x: 5.5,
+        y: 12.5,
+        angle: 0,
+        speed: 3.0,
+        isCaptured: false,
+        hasEscaped: false,
+        cooldowns: {},
+        lastActive: Date.now()
+      }
+    },
+    bots: [],
+    keys: [],
+    doors: [],
+    eventLogs: [],
+    timeLeft: timeLimit || 300,
+    gateOpenCountdown: null,
+    readyCountdown: 30,
+    lastUpdated: Date.now()
+  };
+
+  console.log(`[Lobby] Room created on server: ${upperCode} by Host: ${hostId}`);
+  return res.json({ success: true, room: rooms[upperCode] });
+});
+
+// 2. Join Room (Guest enters room)
+app.post("/api/rooms/join", (req, res) => {
+  const { code, username, nickname, studentRole, teacherRole } = req.body;
+  if (!code || !username) {
+    return res.status(400).json({ error: "Room code and username are required." });
+  }
+
+  const upperCode = code.trim().toUpperCase();
+  const room = rooms[upperCode];
+
+  if (!room) {
+    return res.status(404).json({ error: `[${upperCode}] 방을 찾을 수 없습니다. 초대 코드를 다시 확인해 주십시오.` });
+  }
+
+  // Insert player card
+  room.players[username] = {
+    id: username,
+    username,
+    nickname,
+    isHost: room.hostId === username,
+    isAI: false,
+    team: null,
+    selectedStudentRole: studentRole,
+    selectedTeacherRole: teacherRole,
+    role: null,
+    x: 5.5,
+    y: 12.5,
+    angle: 0,
+    speed: 3.0,
+    isCaptured: false,
+    hasEscaped: false,
+    cooldowns: {},
+    lastActive: Date.now()
+  };
+
+  room.lastUpdated = Date.now();
+  console.log(`[Lobby] Guest joined Room: ${upperCode} - Name: ${nickname} (ID: ${username})`);
+  return res.json({ success: true, room });
+});
+
+// 3. Start Room Game (Authoritative initial setup uploaded from Host)
+app.post("/api/rooms/:code/start_game", (req, res) => {
+  const { code } = req.params;
+  const { players, keys, doors, timeLimit, readyCountdown } = req.body;
+
+  const upperCode = code.toUpperCase();
+  const room = rooms[upperCode];
+  if (!room) {
+    return res.status(404).json({ error: "방을 찾을 수 없습니다." });
+  }
+
+  // Convert array of players back into the room map
+  if (players && Array.isArray(players)) {
+    players.forEach((p: any) => {
+      if (p.isAI) {
+        // Bots are fine as separate entries in room.players or in bots
+        room.players[p.id] = { ...p, lastActive: Date.now() };
+      } else {
+        const id = p.id;
+        room.players[id] = { ...room.players[id], ...p, lastActive: Date.now() };
+      }
+    });
+  }
+
+  if (keys) room.keys = keys;
+  if (doors) room.doors = doors;
+  if (timeLimit) {
+    room.timeLimit = timeLimit;
+    room.timeLeft = timeLimit;
+  }
+  
+  room.phase = "READY_TIME";
+  room.readyCountdown = readyCountdown !== undefined ? readyCountdown : 30;
+  room.lastUpdated = Date.now();
+
+  console.log(`[Gameplay] Room started successfully on Server: ${upperCode}`);
+  return res.json({ success: true, room });
+});
+
+// 4. Update Game coordinates & state snapshots periodically from both Host and Guests
+app.post("/api/rooms/:code/update", (req, res) => {
+  const { code } = req.params;
+  const { playerId, player, bots, keys, doors, eventLogs, phase, timeLeft, gateOpenCountdown, readyCountdown, endingStory } = req.body;
+
+  const upperCode = code.toUpperCase();
+  const room = rooms[upperCode];
+  if (!room) {
+    return res.status(404).json({ error: "실시간 게임 세션 방이 존재하지 않거나 자동 폭파되었습니다." });
+  }
+
+  room.lastUpdated = Date.now();
+
+  // Merging client player coordinate updates
+  if (playerId && player) {
+    room.players[playerId] = {
+      ...room.players[playerId],
+      ...player,
+      lastActive: Date.now()
+    };
+  }
+
+  // Host updates the rest of authoritative elements
+  if (playerId === room.hostId) {
+    if (bots) room.bots = bots;
+    if (keys) room.keys = keys;
+    if (doors) room.doors = doors;
+    if (phase) room.phase = phase;
+    if (timeLeft !== undefined) room.timeLeft = timeLeft;
+    if (gateOpenCountdown !== undefined) room.gateOpenCountdown = gateOpenCountdown;
+    if (readyCountdown !== undefined) room.readyCountdown = readyCountdown;
+    if (endingStory !== undefined) (room as any).endingStory = endingStory;
+
+    // Direct merge of logs: Host passes and appends system logs
+    if (eventLogs && Array.isArray(eventLogs)) {
+      const currentIds = new Set(room.eventLogs.map((l) => l.id));
+      eventLogs.forEach((log) => {
+        if (!currentIds.has(log.id)) {
+          room.eventLogs.push(log);
+        }
+      });
+      if (room.eventLogs.length > 40) {
+        room.eventLogs = room.eventLogs.slice(-40);
+      }
+    }
+  } else {
+    // Ordinary guests can also merge client-originated event logs if they trigger an action (like Free Friend or Use Skill)
+    if (eventLogs && Array.isArray(eventLogs)) {
+      const currentIds = new Set(room.eventLogs.map((l) => l.id));
+      eventLogs.forEach((log) => {
+        if (!currentIds.has(log.id)) {
+          room.eventLogs.push(log);
+        }
+      });
+      if (room.eventLogs.length > 40) {
+        room.eventLogs = room.eventLogs.slice(-40);
+      }
+    }
+    // Also sync keys and doors if guest updates them (e.g. they pick up key or drop key)
+    if (keys && Array.isArray(keys)) {
+      room.keys = keys;
+    }
+    if (doors && Array.isArray(doors)) {
+      room.doors = doors;
+    }
+  }
+
+  // Compile full array to serve back immediately
+  const returnPlayers = Object.values(room.players);
+
+  return res.json({
+    success: true,
+    room: {
+      ...room,
+      players: returnPlayers
+    }
+  });
+});
+
+// 5. Fetch current state of room (GET Poll)
+app.get("/api/rooms/:code", (req, res) => {
+  const upperCode = req.params.code.toUpperCase();
+  const room = rooms[upperCode];
+  if (!room) {
+    return res.status(404).json({ error: "대기방 정보 취득 실패" });
+  }
+
+  // Filter out disconnected guest players if they are silent for 15s (lobby safety)
+  if (room.phase === "LOBBY") {
+    const now = Date.now();
+    Object.keys(room.players).forEach((pId) => {
+      if (pId !== room.hostId && now - room.players[pId].lastActive > 15000) {
+        delete room.players[pId];
+        console.log(`[Cleanup] Dropped timed-out player ${pId} in room ${upperCode}`);
+      }
+    });
+  }
+
+  return res.json({
+    success: true,
+    room: {
+      ...room,
+      players: Object.values(room.players)
+    }
+  });
+});
+
+
 // API: 학교탈출 상황별 캐릭터 대사 인공지능 생성
 app.post("/api/gemini/dialogue", async (req, res) => {
   const { characterName, situation, team } = req.body;
@@ -47,7 +733,6 @@ app.post("/api/gemini/dialogue", async (req, res) => {
 
   const ai = getGeminiClient();
   if (!ai) {
-    // API 키가 없으면 그냥 더미가 아니라 즉시 정상 응답으로 안전한 기본 메시지 전송
     return res.json({ dialogue: `${characterName}: 야간 자율학습은 끝났다. 여기서 반드시 탈출한다!` });
   }
 

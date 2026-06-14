@@ -48,6 +48,13 @@ export default function App() {
   const [teacherCount, setTeacherCount] = useState<number>(1);
   const [timeLimit, setTimeLimit] = useState<number>(300);
 
+  // 실시간 멀티플레이 네트워크 동기화 스테이트
+  const [activeRoomCode, setActiveRoomCode] = useState<string>("");
+  const [isLeader, setIsLeader] = useState<boolean>(false);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [lobbyPhase, setLobbyPhase] = useState<"SELECT" | "ROOM_WAIT">("SELECT");
+  const [lobbyMode, setLobbyMode] = useState<"SOLO" | "INVITE">("SOLO");
+
   // 인게임 시뮬레이션용 데이터 스테이트
   const [players, setPlayers] = useState<Player[]>([]);
   const [keys, setKeys] = useState<KeyItem[]>(INITIAL_KEYS);
@@ -55,6 +62,7 @@ export default function App() {
   const [eventLogs, setEventLogs] = useState<GameEventLog[]>([]);
   const [timeLeft, setTimeLeft] = useState<number>(300);
   const [gateOpenCountdown, setGateOpenCountdown] = useState<number | null>(null);
+  const [readyCountdown, setReadyCountdown] = useState<number>(30);
 
   // 기절 상태 교사들 추적 (교사ID -> 기절 풀릴 타임스탬프)
   const stunnedTeachers = useRef<{ [playerId: string]: number }>({});
@@ -71,6 +79,212 @@ export default function App() {
 
   // 화면 흔들림 효과 변수
   const [screenShake, setScreenShake] = useState(false);
+
+  // 플레이어가 교사일 경우 잡은 명수 기록용
+  const arrestsMade = useRef<number>(0);
+
+  // ==========================================
+  // LOCALSTORAGE USER PROFILE SYNC
+  // ==========================================
+  useEffect(() => {
+    const saved = localStorage.getItem("weak_hero_user");
+    if (saved) {
+      try {
+        const userObj = JSON.parse(saved);
+        setCurrentUser(userObj);
+        setNickname(userObj.nickname);
+      } catch (e) {
+        console.warn("localStorage profile parse error");
+      }
+    }
+  }, []);
+
+  // Update nickname whenever current user changes
+  useEffect(() => {
+    if (currentUser) {
+      setNickname(currentUser.nickname);
+    }
+  }, [currentUser]);
+
+  // ==========================================
+  // REAL-TIME MULTIPLAYER SYNC POLL LOOP (500ms)
+  // ==========================================
+  const playersRef = useRef(players);
+  const keysRef = useRef(keys);
+  const doorsRef = useRef(doors);
+  const eventLogsRef = useRef(eventLogs);
+  const timeLeftRef = useRef(timeLeft);
+  const gateOpenCountdownRef = useRef(gateOpenCountdown);
+  const readyCountdownRef = useRef(readyCountdown);
+  const phaseRef = useRef(phase);
+  const endingStoryRef = useRef(endingStory);
+
+  useEffect(() => {
+    playersRef.current = players;
+    keysRef.current = keys;
+    doorsRef.current = doors;
+    eventLogsRef.current = eventLogs;
+    timeLeftRef.current = timeLeft;
+    gateOpenCountdownRef.current = gateOpenCountdown;
+    readyCountdownRef.current = readyCountdown;
+    phaseRef.current = phase;
+    endingStoryRef.current = endingStory;
+  }, [players, keys, doors, eventLogs, timeLeft, gateOpenCountdown, readyCountdown, phase, endingStory]);
+
+  useEffect(() => {
+    if (!activeRoomCode) return;
+
+    let pollInterval: any = null;
+
+    const runPoll = async () => {
+      try {
+        const currentPlayers = playersRef.current;
+        const currentKeys = keysRef.current;
+        const currentDoors = doorsRef.current;
+        const currentEventLogs = eventLogsRef.current;
+        const currentTimeLeft = timeLeftRef.current;
+        const currentGateOpenCountdown = gateOpenCountdownRef.current;
+        const currentReadyCountdown = readyCountdownRef.current;
+        const currentPhase = phaseRef.current;
+        const currentEndingStory = endingStoryRef.current;
+
+        const myPlayerObj = currentPlayers.find((p) => p.id === "player");
+        
+        let payload: any = {
+          playerId: currentUser?.username || "player"
+        };
+
+        if (myPlayerObj) {
+          payload.player = {
+            id: currentUser?.username || "player",
+            nickname: nickname,
+            isHost: isLeader,
+            isAI: false,
+            team: myPlayerObj.team,
+            selectedStudentRole: prefStudent,
+            selectedTeacherRole: prefTeacher,
+            role: myPlayerObj.role,
+            x: myPlayerObj.x,
+            y: myPlayerObj.y,
+            angle: myPlayerObj.angle,
+            speed: myPlayerObj.speed,
+            isCaptured: myPlayerObj.isCaptured,
+            hasEscaped: myPlayerObj.hasEscaped,
+            cooldowns: myPlayerObj.cooldowns
+          };
+        }
+
+        // Host authoritative synchronize
+        if (isLeader && currentPhase !== GamePhase.LOBBY) {
+          payload.bots = currentPlayers.filter((p) => p.isAI);
+          payload.keys = currentKeys;
+          payload.doors = currentDoors;
+          payload.eventLogs = currentEventLogs;
+          payload.phase = currentPhase;
+          payload.timeLeft = currentTimeLeft;
+          payload.gateOpenCountdown = currentGateOpenCountdown;
+          payload.readyCountdown = currentReadyCountdown;
+          payload.endingStory = currentEndingStory;
+        } else if (currentPhase !== GamePhase.LOBBY) {
+          // Guests can upload modified keys/doors if changed locally (like pick up key or unlock door)
+          payload.keys = currentKeys;
+          payload.doors = currentDoors;
+          payload.eventLogs = currentEventLogs;
+        }
+
+        // POST current update to server
+        const response = await fetch(`/api/rooms/${activeRoomCode}/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success && data.room) {
+            const sRoom = data.room;
+
+            // 1. Lobby Waiting Screen Room Sync
+            if (currentPhase === GamePhase.LOBBY) {
+              const mappedPlayers = sRoom.players.map((sp: any) => {
+                const isSelf = sp.id === (currentUser?.username || "player") || sp.id === "player";
+                if (isSelf) {
+                  return { ...sp, id: "player" }; 
+                }
+                return sp;
+              });
+              
+              setPlayers(mappedPlayers);
+
+              if (sRoom.phase === "READY_TIME" || sRoom.phase === "PLAYING") {
+                setKeys(sRoom.keys);
+                setDoors(sRoom.doors);
+                setTimeLeft(sRoom.timeLeft);
+                setReadyCountdown(sRoom.readyCountdown);
+                setPhase(sRoom.phase);
+              }
+            } else {
+              // 2. Active Escape Mode Sync
+              const localPlayer = currentPlayers.find((p) => p.id === "player");
+              
+              const mergedPlayers = sRoom.players.map((sp: any) => {
+                const isSelf = (sp.id === (currentUser?.username || "player")) || (sp.id === "player");
+                if (isSelf) {
+                  return {
+                    ...sp,
+                    id: "player",
+                    x: localPlayer ? localPlayer.x : sp.x,
+                    y: localPlayer ? localPlayer.y : sp.y,
+                    angle: localPlayer ? localPlayer.angle : sp.angle,
+                    isCaptured: localPlayer ? localPlayer.isCaptured : sp.isCaptured,
+                    hasEscaped: localPlayer ? localPlayer.hasEscaped : sp.hasEscaped,
+                    cooldowns: localPlayer ? localPlayer.cooldowns : (sp.cooldowns || {})
+                  };
+                }
+                return sp;
+              });
+
+              setPlayers(mergedPlayers);
+              setKeys(sRoom.keys);
+              setDoors(sRoom.doors);
+              
+              if (!isLeader) {
+                if (sRoom.phase !== currentPhase) {
+                  setPhase(sRoom.phase);
+                }
+                setTimeLeft(sRoom.timeLeft);
+                setGateOpenCountdown(sRoom.gateOpenCountdown);
+                setReadyCountdown(sRoom.readyCountdown);
+                if (sRoom.endingStory) {
+                  setEndingStory(sRoom.endingStory);
+                }
+              }
+
+              if (sRoom.eventLogs && sRoom.eventLogs.length > 0) {
+                setEventLogs((prev) => {
+                  const existingIds = new Set(prev.map((l) => l.id));
+                  const newLogs = sRoom.eventLogs.filter((l: any) => !existingIds.has(l.id));
+                  if (newLogs.length > 0) {
+                    return [...newLogs, ...prev].slice(0, 50);
+                  }
+                  return prev;
+                });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Multiplayer polling error:", err);
+      }
+    };
+
+    runPoll();
+    pollInterval = setInterval(runPoll, 500);
+
+    return () => {
+      clearInterval(pollInterval);
+    };
+  }, [activeRoomCode, isLeader, currentUser?.username, nickname, prefStudent, prefTeacher]);
 
   // ==========================================
   // LOG MANAGER
@@ -94,7 +308,7 @@ export default function App() {
   // ==========================================
   // GAME RE-BOOT SETUP
   // ==========================================
-  const handleStartSetup = (setup: {
+  const handleStartSetup = async (setup: {
     nickname: string;
     studentRole: StudentRole;
     teacherRole: TeacherRole;
@@ -108,17 +322,43 @@ export default function App() {
     setTeacherCount(setup.teacherCount);
     setTimeLimit(setup.timeLimit);
     setTimeLeft(setup.timeLimit);
+    arrestsMade.current = 0;
 
     setPhase(GamePhase.ROLE_ASSIGN);
 
-    // 2초 뒤 역할 배정 루프 트리거
-    setTimeout(() => {
-      assignRoles(setup);
+    // Track ready sequences
+    setTimeout(async () => {
+      const initialPlayers = assignRolesAndGetPlayers(setup);
+      
+      if (activeRoomCode && isLeader) {
+        try {
+          await fetch(`/api/rooms/${activeRoomCode}/start_game`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              players: initialPlayers.map((p) => {
+                if (p.id === "player") {
+                  return { ...p, id: currentUser?.username || "player" }; 
+                }
+                return p;
+              }),
+              keys: INITIAL_KEYS,
+              doors: INITIAL_DOORS,
+              timeLimit: setup.timeLimit,
+              readyCountdown: 30
+            })
+          });
+        } catch (err) {
+          console.error("Failed to post start_game room configurations:", err);
+        }
+      }
+      
+      setPhase(GamePhase.READY_TIME);
     }, 2000);
   };
 
-  // 역할 랜덤 고배정
-  const assignRoles = (setup: {
+  // 역할 랜덤 배정 계산기 (Initial Positions)
+  const assignRolesAndGetPlayers = (setup: {
     nickname: string;
     studentRole: StudentRole;
     teacherRole: TeacherRole;
@@ -126,26 +366,26 @@ export default function App() {
     timeLimit: number;
     participants?: { name: string; ready: boolean; avatar: string }[];
   }) => {
-    // 6명 참가자 생성 (1 플레이어 + dynamic list of lobbied participants)
     const botPool = setup.participants && setup.participants.length > 0
       ? setup.participants.map((p, pIdx) => {
           const studentRoles = [StudentRole.YEON_SI_EUN, StudentRole.PARK_HU_MIN, StudentRole.KEUM_SUNG_JE, StudentRole.AHN_SU_HO];
           const teacherRoles = [TeacherRole.TEACHER_A, TeacherRole.TEACHER_B, TeacherRole.TEACHER_C];
           return {
+            id: p.avatar === "👥" ? p.name : `bot_${pIdx + 1}`,
             nickname: p.name,
             s: studentRoles[pIdx % studentRoles.length],
-            t: teacherRoles[pIdx % teacherRoles.length]
+            t: teacherRoles[pIdx % teacherRoles.length],
+            isAI: p.avatar !== "👥"
           };
         })
       : [
-          { nickname: "은장고박지성", s: StudentRole.YEON_SI_EUN, t: TeacherRole.TEACHER_B },
-          { nickname: "볼펜깎이인형", s: StudentRole.YEON_SI_EUN, t: TeacherRole.TEACHER_A },
-          { nickname: "수호단대장", s: StudentRole.AHN_SU_HO, t: TeacherRole.TEACHER_C },
-          { nickname: "형신고빠따짱", s: StudentRole.KEUM_SUNG_JE, t: TeacherRole.TEACHER_A },
-          { nickname: "삼인조막둥이", s: StudentRole.PARK_HU_MIN, t: TeacherRole.TEACHER_C },
+          { id: "bot_1", nickname: "은장고박지성", s: StudentRole.YEON_SI_EUN, t: TeacherRole.TEACHER_B, isAI: true },
+          { id: "bot_2", nickname: "볼펜깎이인형", s: StudentRole.YEON_SI_EUN, t: TeacherRole.TEACHER_A, isAI: true },
+          { id: "bot_3", nickname: "수호단대장", s: StudentRole.AHN_SU_HO, t: TeacherRole.TEACHER_C, isAI: true },
+          { id: "bot_4", nickname: "형신고빠따짱", s: StudentRole.KEUM_SUNG_JE, t: TeacherRole.TEACHER_A, isAI: true },
+          { id: "bot_5", nickname: "삼인조막둥이", s: StudentRole.PARK_HU_MIN, t: TeacherRole.TEACHER_C, isAI: true },
         ];
 
-    // 교사 배당 인덱스 무작위 추출
     const totalCount = 1 + botPool.length;
     const actualTeacherCount = Math.min(setup.teacherCount, Math.max(1, Math.floor(totalCount / 2)));
     const teacherIndices = new Set<number>();
@@ -155,18 +395,18 @@ export default function App() {
 
     const initialPlayers: Player[] = [];
 
-    // 플레이러 카드 생성
+    // Local player
     const isPlayerTeacher = teacherIndices.has(0);
     initialPlayers.push({
       id: "player",
       nickname: setup.nickname,
-      isHost: true,
+      isHost: isLeader,
       isAI: false,
       team: isPlayerTeacher ? "TEACHER" : "STUDENT",
       selectedStudentRole: setup.studentRole,
       selectedTeacherRole: setup.teacherRole,
       role: isPlayerTeacher ? setup.teacherRole : setup.studentRole,
-      x: isPlayerTeacher ? 8.5 : 5.5, // 교사는 중앙, 학생은 다른 교실 근처 스폰
+      x: isPlayerTeacher ? 8.5 : 5.5,
       y: isPlayerTeacher ? 8.5 : 12.5,
       angle: 0,
       speed: isPlayerTeacher ? 2.5 : 3.0,
@@ -175,21 +415,20 @@ export default function App() {
       cooldowns: {},
     });
 
-    // 봇 카드 생성
+    // Bots and other human guests
     botPool.forEach((bot, bIdx) => {
       const idxInList = bIdx + 1;
       const isBotTeacher = teacherIndices.has(idxInList);
 
       initialPlayers.push({
-        id: `bot_${idxInList}`,
+        id: bot.id,
         nickname: bot.nickname,
         isHost: false,
-        isAI: true,
+        isAI: bot.isAI,
         team: isBotTeacher ? "TEACHER" : "STUDENT",
         selectedStudentRole: bot.s,
         selectedTeacherRole: bot.t,
         role: isBotTeacher ? bot.t : bot.s,
-        // 무작위 거점 스폰 배치
         x: isBotTeacher ? 8.5 : 2.5 + Math.random() * 11,
         y: isBotTeacher ? 8.5 : 4.5 + Math.random() * 9,
         angle: Math.random() * Math.PI * 2,
@@ -201,7 +440,7 @@ export default function App() {
     });
 
     setPlayers(initialPlayers);
-    setKeys(JSON.parse(JSON.stringify(INITIAL_KEYS))); // 깊은 카피 복작
+    setKeys(JSON.parse(JSON.stringify(INITIAL_KEYS)));
     setDoors(JSON.parse(JSON.stringify(INITIAL_DOORS)));
     setEventLogs([]);
     stunnedTeachers.current = {};
@@ -211,19 +450,18 @@ export default function App() {
     setGateOpenCountdown(null);
     setEndingStory("");
 
-    // 메인 오프닝 브리핑 로깅
+    // Logger
     addLog("🏫 야간 자율학습 도중 갑작스런 학교 락다운 봉쇄 경고가 울렸습니다!", "danger");
     addLog("교사들은 야간 무단 도망 학생 단체 체포 작전을 개시했습니다.", "danger");
     addLog(`배정 결과: 플레이어 ${setup.nickname}님은 [${isPlayerTeacher ? "교사 팀" : "학생 팀"}] 입니다!`, "success");
 
-    // 30초 대기(READY_TIME) 진입!
-    setPhase(GamePhase.READY_TIME);
+    return initialPlayers;
   };
+
 
   // ==========================================
   // READY_TIME & PLAYING GAME TIMERS
   // ==========================================
-  const [readyCountdown, setReadyCountdown] = useState(30);
 
   useEffect(() => {
     if (phase === GamePhase.READY_TIME) {
@@ -627,6 +865,10 @@ export default function App() {
     student.x = 1.5; // 생활지도실 내부 스폰
     student.y = 1.5;
 
+    if (teacher.id === "player") {
+      arrestsMade.current += 1;
+    }
+
     // 만약 주우기 한 열쇠가 있다면 방 바닥에 떨어뜨리기
     setKeys((prevKeys) =>
       prevKeys.map((k) =>
@@ -776,8 +1018,8 @@ export default function App() {
 
   // 플레이어 상호작용 E 처리
   const handlePlayerInteract = async () => {
-    const pSelf = players.find((p) => p.id === "player")!;
-    if (pSelf.isCaptured || pSelf.hasEscaped) return;
+    const pSelf = players.find((p) => p.id === "player");
+    if (!pSelf || pSelf.isCaptured || pSelf.hasEscaped) return;
 
     // 1. 바닥 열쇠 획득 시도
     for (const key of keys) {
@@ -858,8 +1100,8 @@ export default function App() {
 
   // 플레이어 기술 시전 F 처리
   const handlePlayerUseSkill = async () => {
-    const pSelf = players.find((p) => p.id === "player")!;
-    if (pSelf.isCaptured || pSelf.hasEscaped) return;
+    const pSelf = players.find((p) => p.id === "player");
+    if (!pSelf || pSelf.isCaptured || pSelf.hasEscaped) return;
 
     const myCD = pSelf.cooldowns["MAIN"] || 0;
     if (myCD > 0) {
@@ -1000,6 +1242,39 @@ export default function App() {
 
     addLog(`📢 경기 종료! 최종 승자는 [${isStudentVictory ? "학생 연맹" : "교사 사냥단"}] 팀입니다!`, "system");
 
+    // 실시간 Supabase전적 업데이트 파이프
+    const localPlayer = players.find((p) => p.id === "player");
+    if (currentUser && localPlayer) {
+      const isWin = (localPlayer.team === "STUDENT" && isStudentVictory) || 
+                    (localPlayer.team === "TEACHER" && !isStudentVictory);
+      const didEscape = localPlayer.team === "STUDENT" && localPlayer.hasEscaped;
+      const arrestsCount = localPlayer.team === "TEACHER" ? arrestsMade.current : 0;
+
+      try {
+        const resp = await fetch("/api/profile/update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: currentUser.username,
+            isWin,
+            didEscape,
+            arrests: arrestsCount
+          })
+        });
+
+        if (resp.ok) {
+          const uData = await resp.json();
+          if (uData.success && uData.profile) {
+            setCurrentUser(uData.profile);
+            localStorage.setItem("weak_hero_user", JSON.stringify(uData.profile));
+            addLog(`🎖️ 전적 기록 성공! 승률과 레벨이 상승하였습니다.`, "success");
+          }
+        }
+      } catch (err) {
+        console.error("Failed to update post-game stats:", err);
+      }
+    }
+
     // 제미니 최종 감명 결말 요약 스토리 생성 요청
     const story = await fetchGeminiStory(isStudentVictory, escaped, captured, timeStr);
     setEndingStory(story);
@@ -1011,7 +1286,20 @@ export default function App() {
       
       {/* 1. 로비 화면 렌더 */}
       {phase === GamePhase.LOBBY && (
-        <MainLobby onStartGame={handleStartSetup} />
+        <MainLobby
+          onStartGame={handleStartSetup}
+          currentUser={currentUser}
+          setCurrentUser={setCurrentUser}
+          activeRoomCode={activeRoomCode}
+          setActiveRoomCode={setActiveRoomCode}
+          isLeader={isLeader}
+          setIsLeader={setIsLeader}
+          lobbyPhase={lobbyPhase}
+          setLobbyPhase={setLobbyPhase}
+          lobbyMode={lobbyMode}
+          setLobbyMode={setLobbyMode}
+          players={players}
+        />
       )}
 
       {/* 2. 대기 연출 화면 렌더 */}
@@ -1038,25 +1326,33 @@ export default function App() {
           {/* 메인 어플리케이션 인터페이스 (정면 FPP 카메라 + 제어 상태 판넬) */}
           {phase !== GamePhase.GAME_OVER ? (
             <div className="flex-grow flex flex-col gap-4">
-              {/* 3D POV & Minimap 조종 모듈 */}
-              <FirstPersonCanvas
-                player={players.find((p) => p.id === "player")!}
-                players={players}
-                keys={keys}
-                doors={doors}
-                onMove={handlePlayerMove}
-                onInteract={handlePlayerInteract}
-                onUseSkill={handlePlayerUseSkill}
-                activeFootprints={activeFootprints}
-                teachersScanActive={teachersScanActive}
-                phase={phase}
-                readyCountdown={readyCountdown}
-                stunnedTeachers={stunnedTeachers}
-                eventLogs={eventLogs}
-                timeLeft={timeLeft}
-                gateOpenCountdown={gateOpenCountdown}
-                onExit={() => setPhase(GamePhase.LOBBY)}
-              />
+              {players.find((p) => p.id === "player") ? (
+                /* 3D POV & Minimap 조종 모듈 */
+                <FirstPersonCanvas
+                  player={players.find((p) => p.id === "player")!}
+                  players={players}
+                  keys={keys}
+                  doors={doors}
+                  onMove={handlePlayerMove}
+                  onInteract={handlePlayerInteract}
+                  onUseSkill={handlePlayerUseSkill}
+                  activeFootprints={activeFootprints}
+                  teachersScanActive={teachersScanActive}
+                  phase={phase}
+                  readyCountdown={readyCountdown}
+                  stunnedTeachers={stunnedTeachers}
+                  eventLogs={eventLogs}
+                  timeLeft={timeLeft}
+                  gateOpenCountdown={gateOpenCountdown}
+                  onExit={() => setPhase(GamePhase.LOBBY)}
+                />
+              ) : (
+                <div className="flex-grow flex flex-col items-center justify-center p-12 text-center bg-[#15171d] border border-gray-800 rounded-3xl">
+                  <span className="text-3xl animate-bounce">⏳</span>
+                  <h3 className="text-lg font-bold text-white mt-4">교내 통신 대기 중...</h3>
+                  <p className="text-xs text-gray-400 mt-1">서버의 플레이어 정보를 원격 수신 중입니다.</p>
+                </div>
+              )}
             </div>
           ) : (
             /* GAME OVER 결과 요약 화면 렌더 */
@@ -1153,13 +1449,14 @@ export default function App() {
                     onClick={() => {
                       setPhase(GamePhase.ROLE_ASSIGN);
                       setTimeout(() => {
-                        assignRoles({
+                        assignRolesAndGetPlayers({
                           nickname,
                           studentRole: prefStudent,
                           teacherRole: prefTeacher,
                           teacherCount,
                           timeLimit,
                         });
+                        setPhase(GamePhase.READY_TIME); // Advance to ready time
                       }, 2000);
                     }}
                     className="bg-red-600 hover:bg-red-700 text-white border border-red-900 px-6 py-3 rounded-xl font-mono text-xs font-bold transition flex items-center gap-1.5 shadow-md cursor-pointer hover:scale-[1.01]"
