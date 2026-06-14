@@ -273,3 +273,63 @@ export function checkCollision(
 export function getDistance(x1: number, y1: number, x2: number, y2: number): number {
   return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
 }
+
+/**
+ * 두 지점(x1, y1)과 (x2, y2) 사이에 벽이나 닫힌 문 등 충돌 장애물이 가로막고 있는지 실시간 검출합니다.
+ * 이를 통해 벽 너머에 놓인 열쇠를 불법으로 획집하거나 자물쇠를 벽 뒤에서 여는 등의 버그를 원천 물리 무효화합니다.
+ */
+export function hasWallBetween(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  lockedDoors: { [key: string]: boolean } = {},
+  gateUnlocked: boolean = false
+): boolean {
+  const dist = getDistance(x1, y1, x2, y2);
+  if (dist < 0.1) return false;
+
+  // 두 타겟 사이를 이은 선상에서 아주 촘촘하게 0.08 칸씩 전진 샘플링 검문 수행
+  const steps = Math.ceil(dist / 0.08);
+  const dx = (x2 - x1) / steps;
+  const dy = (y2 - y1) / steps;
+
+  const isWallTile = (x: number, y: number): boolean => {
+    const gridX = Math.floor(x);
+    const gridY = Math.floor(y);
+
+    if (gridX < 0 || gridX >= MAP_WIDTH || gridY < 0 || gridY >= MAP_HEIGHT) {
+      return true;
+    }
+
+    const cell = SCHOOL_MAP[gridY][gridX];
+    if (cell > 0) {
+      if (cell === 5) {
+        // 교실 잠긴 문
+        const cls = CLASSROOMS.find((c) => c.doorX === gridX && c.doorY === gridY);
+        if (cls && lockedDoors[cls.color]) {
+          return true;
+        }
+      } else if (cell === 3) {
+        // 봉쇄된 정문
+        if (!gateUnlocked) {
+          return true;
+        }
+      } else {
+        return true; // 기타 내외벽 등 단단한 구조물 전체
+      }
+    }
+    return false;
+  };
+
+  // 플레이어 자신 위치 바로 근처 및 목적지 바로 근처는 소폭 여유 마진 적용
+  for (let i = 2; i < steps - 1; i++) {
+    const cx = x1 + dx * i;
+    const cy = y1 + dy * i;
+    if (isWallTile(cx, cy)) {
+      return true; // 선상에 격자 장애물이 하나라도 전치함!
+    }
+  }
+
+  return false;
+}

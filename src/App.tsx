@@ -17,7 +17,7 @@ import {
 import { MainLobby, STUDENT_CHARACTERS, TEACHER_CHARACTERS } from "./components/MainLobby";
 import { FirstPersonCanvas } from "./components/FirstPersonCanvas";
 import { StatusPanel } from "./components/StatusPanel";
-import { SCHOOL_MAP, MAP_WIDTH, MAP_HEIGHT, CLASSROOMS, getDistance, checkCollision } from "./utils/map";
+import { SCHOOL_MAP, MAP_WIDTH, MAP_HEIGHT, CLASSROOMS, getDistance, checkCollision, hasWallBetween } from "./utils/map";
 import { fetchGeminiDialogue, fetchGeminiStory } from "./utils/gemini";
 import { Shield, Sparkles, LogOut, RotateCcw, Award, Users, Trash } from "lucide-react";
 
@@ -82,6 +82,9 @@ export default function App() {
 
   // 플레이어가 교사일 경우 잡은 명수 기록용
   const arrestsMade = useRef<number>(0);
+
+  // 실시간 즉각 이동 패킷 보고용 Ref (500ms 지연을 우회하여 롤백 원천 제거)
+  const lastMoveSentTime = useRef<number>(0);
 
   // ==========================================
   // LOCALSTORAGE USER PROFILE SYNC
@@ -227,9 +230,11 @@ export default function App() {
               // 2. Active Escape Mode Sync
               const localPlayer = currentPlayers.find((p) => p.id === "player");
               
+              let hasLocalPlayerInMerged = false;
               const mergedPlayers = sRoom.players.map((sp: any) => {
-                const isSelf = (sp.id === (currentUser?.username || "player")) || (sp.id === "player");
+                const isSelf = sp.id === "player" || (currentUser?.username && sp.id === currentUser.username);
                 if (isSelf) {
+                  hasLocalPlayerInMerged = true;
                   return {
                     ...sp,
                     id: "player",
@@ -243,6 +248,11 @@ export default function App() {
                 }
                 return sp;
               });
+
+              // 로컬 플레이어 개체가 매핑 중 찰나적으로 실종되는 대참사를 방어하는 복원핀 추가
+              if (!hasLocalPlayerInMerged && localPlayer) {
+                mergedPlayers.push(localPlayer);
+              }
 
               setPlayers(mergedPlayers);
               setKeys(sRoom.keys);
@@ -993,7 +1003,7 @@ export default function App() {
     const pSelf = players.find((p) => p.id === "player");
     if (!pSelf) return;
 
-    // 교적인 경우 READY_TIME 단체 봉쇄 대기 시간 중 이동 불허
+    // 교사인 경우 READY_TIME 단체 봉쇄 대기 시간 중 이동 불허
     if (phase === GamePhase.READY_TIME && pSelf.team === "TEACHER") {
       return;
     }
@@ -1003,9 +1013,21 @@ export default function App() {
       
       // 교사 플레이어(본인)이고 인게임 상황인 경우, 주변의 잡히지 않은 학생 봇 접촉(충돌) 시 즉각 체포 성립!
       if (pSelf.team === "TEACHER" && phase === GamePhase.PLAYING) {
-        // 동시성 상태 변경을 위해 동기화
+        // 정문과 구실 문들의 잠금 상태를 매핑
+        const lockedDoorsState: { [key: string]: boolean } = {};
+        doors.forEach((d) => {
+          lockedDoorsState[d.color] = d.isLocked;
+        });
+        const isGateOpen = doors.every((d) => d.buttonPressed);
+
+        // 동시성 상태 변경을 위해 동기화 (학생과 나 사이에 물리 벽이 없어야 성립!)
         const targetStudent = nextPlayers.find(
-          (s) => s.team === "STUDENT" && !s.isCaptured && !s.hasEscaped && getDistance(x, y, s.x, s.y) < 0.98
+          (s) =>
+            s.team === "STUDENT" &&
+            !s.isCaptured &&
+            !s.hasEscaped &&
+            getDistance(x, y, s.x, s.y) < 1.05 &&
+            !hasWallBetween(x, y, s.x, s.y, lockedDoorsState, isGateOpen)
         );
         if (targetStudent) {
           setTimeout(() => {
@@ -1015,6 +1037,41 @@ export default function App() {
       }
       return nextPlayers;
     });
+
+    // 실시간 비결: 약 100ms 주기로 서버에 플레이어 자기 좌표 기속 동기화
+    if (activeRoomCode) {
+      const now = Date.now();
+      if (now - lastMoveSentTime.current > 100) {
+        lastMoveSentTime.current = now;
+
+        const payload = {
+          playerId: currentUser?.username || "player",
+          player: {
+            id: currentUser?.username || "player",
+            nickname: nickname,
+            isHost: isLeader,
+            isAI: false,
+            team: pSelf.team,
+            selectedStudentRole: prefStudent,
+            selectedTeacherRole: prefTeacher,
+            role: pSelf.role,
+            x: x,
+            y: y,
+            angle: angle,
+            speed: pSelf.speed,
+            isCaptured: pSelf.isCaptured,
+            hasEscaped: pSelf.hasEscaped,
+            cooldowns: pSelf.cooldowns
+          }
+        };
+
+        fetch(`/api/rooms/${activeRoomCode}/update`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }).catch((err) => console.warn("Instant motion update failed:", err));
+      }
+    }
   };
 
   // 플레이어 상호작용 E 처리
@@ -1022,9 +1079,20 @@ export default function App() {
     const pSelf = players.find((p) => p.id === "player");
     if (!pSelf || pSelf.isCaptured || pSelf.hasEscaped) return;
 
-    // 1. 바닥 열쇠 획득 시도
+    // 각 교실 문과 정문 등의 실시간 잠금 레이아웃 상태 취합
+    const lockedDoorsState: { [key: string]: boolean } = {};
+    doors.forEach((d) => {
+      lockedDoorsState[d.color] = d.isLocked;
+    });
+    const isGateOpen = doors.every((d) => d.buttonPressed);
+
+    // 1. 바닥 열쇠 획득 시도 (물리 방벽이 가로막고 있다면 획득 불가 처리)
     for (const key of keys) {
-      if (!key.isHeld && getDistance(pSelf.x, pSelf.y, key.x, key.y) < 1.25) {
+      if (
+        !key.isHeld &&
+        getDistance(pSelf.x, pSelf.y, key.x, key.y) < 1.35 &&
+        !hasWallBetween(pSelf.x, pSelf.y, key.x, key.y, lockedDoorsState, isGateOpen)
+      ) {
         // 이미 다른 색 열쇠를 쥐고 있다면? 교체 방식을 간단히 Drop 처리하거나 여러 개 가용
         // 여기선 1번에 1개만 편리하게 수취하는 가이드라인 적용
         const myPrevKey = keys.find((k) => k.isHeld && k.heldBy === pSelf.id);
@@ -1044,9 +1112,13 @@ export default function App() {
       }
     }
 
-    // 2. 잠긴 문 자물쇠 풀기 해제
+    // 2. 잠긴 문 자물쇠 풀기 해제 (벽 너머에서 열 수 없게 방지)
     for (const d of doors) {
-      if (d.isLocked && getDistance(pSelf.x, pSelf.y, d.x, d.y) < 1.5) {
+      if (
+        d.isLocked &&
+        getDistance(pSelf.x, pSelf.y, d.x, d.y) < 1.6 &&
+        !hasWallBetween(pSelf.x, pSelf.y, d.x, d.y, lockedDoorsState, isGateOpen)
+      ) {
         // 일치하는 색상 열쇠 확인
         const correctKey = keys.find((k) => k.color === d.color && k.isHeld && k.heldBy === pSelf.id);
         if (correctKey) {
@@ -1067,20 +1139,29 @@ export default function App() {
       }
     }
 
-    // 3. 자물쇠 방 버튼 작동
+    // 3. 자물쇠 방 버튼 작동 (벽 뒤 조작 방지)
     for (const d of doors) {
       if (!d.isLocked && !d.buttonPressed) {
         const clsInfo = CLASSROOMS.find((cl) => cl.color === d.color);
-        if (clsInfo && getDistance(pSelf.x, pSelf.y, clsInfo.buttonX, clsInfo.buttonY) < 1.45) {
+        if (
+          clsInfo &&
+          getDistance(pSelf.x, pSelf.y, clsInfo.buttonX, clsInfo.buttonY) < 1.55 &&
+          !hasWallBetween(pSelf.x, pSelf.y, clsInfo.buttonX, clsInfo.buttonY, lockedDoorsState, isGateOpen)
+        ) {
           triggerButtonPress(d.color, pSelf.nickname);
           return;
         }
       }
     }
 
-    // 4. 잡힌 동료 구출하기
+    // 4. 잡힌 동료 구출하기 (벽 너머 우회 구출 방지)
     for (const other of players) {
-      if (other.id !== pSelf.id && other.isCaptured && getDistance(pSelf.x, pSelf.y, other.x, other.y) < 1.5) {
+      if (
+        other.id !== pSelf.id &&
+        other.isCaptured &&
+        getDistance(pSelf.x, pSelf.y, other.x, other.y) < 1.6 &&
+        !hasWallBetween(pSelf.x, pSelf.y, other.x, other.y, lockedDoorsState, isGateOpen)
+      ) {
         freeCapturedStudent(other, pSelf.nickname);
         return;
       }
@@ -1090,7 +1171,10 @@ export default function App() {
     if (pSelf.team === "TEACHER" && phase === GamePhase.PLAYING) {
       for (const other of players) {
         if (other.team === "STUDENT" && !other.isCaptured && !other.hasEscaped) {
-          if (getDistance(pSelf.x, pSelf.y, other.x, other.y) < 1.45) {
+          if (
+            getDistance(pSelf.x, pSelf.y, other.x, other.y) < 1.5 &&
+            !hasWallBetween(pSelf.x, pSelf.y, other.x, other.y, lockedDoorsState, isGateOpen)
+          ) {
             triggerArrest(pSelf, other);
             return;
           }

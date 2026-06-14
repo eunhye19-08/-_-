@@ -5,7 +5,7 @@
 
 import React, { useRef, useEffect, useState } from "react";
 import { Player, KeyItem, LockDoor, KeyColor, GamePhase, GameEventLog } from "../types";
-import { MAP_WIDTH, MAP_HEIGHT, SCHOOL_MAP, CLASSROOMS, castRay, getDistance, checkCollision } from "../utils/map";
+import { MAP_WIDTH, MAP_HEIGHT, SCHOOL_MAP, CLASSROOMS, castRay, getDistance, checkCollision, hasWallBetween } from "../utils/map";
 import { Shield, Sparkles, Navigation, RotateCcw, HelpCircle, Footprints, MessageSquare, LogOut, Zap } from "lucide-react";
 import { STUDENT_CHARACTERS, TEACHER_CHARACTERS } from "./MainLobby";
 
@@ -100,6 +100,19 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
   const localAngle = useRef(player.angle);
   const lastSentTime = useRef(0);
   const lastPlayerPositions = useRef<{ [id: string]: { x: number; y: number } }>({});
+  const lastPointerLockExitTime = useRef(0);
+
+  useEffect(() => {
+    const handlePointerLockChange = () => {
+      if (!document.pointerLockElement) {
+        lastPointerLockExitTime.current = Date.now();
+      }
+    };
+    document.addEventListener("pointerlockchange", handlePointerLockChange);
+    return () => {
+      document.removeEventListener("pointerlockchange", handlePointerLockChange);
+    };
+  }, []);
 
   useEffect(() => {
     localX.current = player.x;
@@ -134,8 +147,18 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
     });
   }, []);
 
-  // 키보드 리스너 등록
+  // 키보드 리스너 등록 및 자동 포커스
   useEffect(() => {
+    // 마운트 시 즉각 iframe 및 윈도우 포커스 시도
+    try {
+      window.focus();
+      if (canvasRef.current) {
+        canvasRef.current.focus();
+      }
+    } catch (err) {
+      console.warn("Initial focus request failed:", err);
+    }
+
     const normalizeKey = (keyString: string): string => {
       const k = keyString.toLowerCase();
       if (k === "ㅈ" || k === "ㅉ") return "w";
@@ -148,16 +171,16 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
     };
 
     const getUnifiedKey = (e: KeyboardEvent): string => {
-      const code = e.code;
-      if (code === "ShiftLeft" || code === "ShiftRight") return "shift";
-      if (code === "KeyW" || code === "ArrowUp") return "w";
-      if (code === "KeyS" || code === "ArrowDown") return "s";
-      if (code === "KeyA") return "a";
-      if (code === "KeyD") return "d";
-      if (code === "KeyE") return "e";
-      if (code === "KeyF") return "f";
-      if (code === "ArrowLeft") return "arrowleft";
-      if (code === "ArrowRight") return "arrowright";
+      const code = e.code ? e.code.toLowerCase() : "";
+      if (code === "shiftleft" || code === "shiftright") return "shift";
+      if (code === "keyw" || code === "arrowup") return "w";
+      if (code === "keys" || code === "arrowdown") return "s";
+      if (code === "keya") return "a";
+      if (code === "keyd") return "d";
+      if (code === "keye") return "e";
+      if (code === "keyf") return "f";
+      if (code === "arrowleft") return "arrowleft";
+      if (code === "arrowright") return "arrowright";
       
       const rawK = e.key.toLowerCase();
       if (rawK === "shift") return "shift";
@@ -170,8 +193,19 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
 
       const k = getUnifiedKey(e);
       keysPressed.current[k] = true;
+      keysPressed.current[e.key.toLowerCase()] = true;
+      if (e.code) {
+        keysPressed.current[e.code.toLowerCase()] = true;
+      }
+      
       if (k === "w") keysPressed.current["arrowup"] = true;
       if (k === "s") keysPressed.current["arrowdown"] = true;
+
+      // 게임 조작 키 입력 동안 브라우저 스크롤 등의 기본 행동 방지 (오직 인게임 상태일 때만)
+      const preventKeys = ["w", "s", "a", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", " ", "space"];
+      if (preventKeys.includes(k) || preventKeys.includes(e.key.toLowerCase())) {
+        e.preventDefault();
+      }
 
       const currPlayer = playerRef.current;
       // 상호작용 단축키 E (수동 작동 목적)
@@ -187,13 +221,22 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
     const handleKeyUp = (e: KeyboardEvent) => {
       const k = getUnifiedKey(e);
       keysPressed.current[k] = false;
+      keysPressed.current[e.key.toLowerCase()] = false;
+      if (e.code) {
+        keysPressed.current[e.code.toLowerCase()] = false;
+      }
+      
       if (k === "w") keysPressed.current["arrowup"] = false;
       if (k === "s") keysPressed.current["arrowdown"] = false;
-      onMoveRef.current(localX.current, localY.current, localAngle.current);
+      
+      // 혹시 한글 입력 전환 등 수동 예외 방어
+      if (k === "w" || k === "s" || k === "a" || k === "d" || k === "arrowup" || k === "arrowdown" || k === "arrowleft" || k === "arrowright") {
+        onMoveRef.current(localX.current, localY.current, localAngle.current);
+      }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("keydown", handleKeyDown, { passive: false });
+    window.addEventListener("keyup", handleKeyUp, { passive: false });
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
@@ -232,26 +275,30 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
           moved = true;
         }
 
-        // A 키는 항상 좌측으로 게걸음(스트레이프) 이동
-        if (keysPressed.current["a"]) {
+        // A 키는 항상 좌측으로 게걸음(스트레이프) 이동 (한글 자판 ㅁ 및 물리 키코드 keya 지원)
+        const pressingA = keysPressed.current["a"] || keysPressed.current["keya"] || keysPressed.current["ㅁ"];
+        if (pressingA) {
           dx += Math.cos(localAngle.current - Math.PI / 2) * moveSpeed;
           dy += Math.sin(localAngle.current - Math.PI / 2) * moveSpeed;
           moved = true;
         }
-        // D 키는 항상 우측으로 게걸음(스트레이프) 이동
-        if (keysPressed.current["d"]) {
+        // D 키는 항상 우측으로 게걸음(스트레이프) 이동 (한글 자판 ㅇ 및 물리 키코드 keyd 지원)
+        const pressingD = keysPressed.current["d"] || keysPressed.current["keyd"] || keysPressed.current["ㅇ"];
+        if (pressingD) {
           dx += Math.cos(localAngle.current + Math.PI / 2) * moveSpeed;
           dy += Math.sin(localAngle.current + Math.PI / 2) * moveSpeed;
           moved = true;
         }
 
-        // 전진/후진 (W, S)
-        if (keysPressed.current["w"] || keysPressed.current["arrowup"]) {
+        // 전진/후진 (W, S) (방향키 및 한글 자판 ㅈ, ㄴ 및 물리 키코드 keyw, keys 지원)
+        const pressingW = keysPressed.current["w"] || keysPressed.current["arrowup"] || keysPressed.current["keyw"] || keysPressed.current["ㅈ"];
+        if (pressingW) {
           dx += Math.cos(localAngle.current) * moveSpeed;
           dy += Math.sin(localAngle.current) * moveSpeed;
           moved = true;
         }
-        if (keysPressed.current["s"] || keysPressed.current["arrowdown"]) {
+        const pressingS = keysPressed.current["s"] || keysPressed.current["arrowdown"] || keysPressed.current["keys"] || keysPressed.current["ㄴ"];
+        if (pressingS) {
           dx -= Math.cos(localAngle.current) * moveSpeed;
           dy -= Math.sin(localAngle.current) * moveSpeed;
           moved = true;
@@ -317,11 +364,21 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
       return;
     }
 
-    // 1. 교사 플레이어 전용: 주변 of 학생 봇 수동 체포 감지 보강
+    // 각 문들과 정문의 잠금 상태를 매핑
+    const lockedDoorsState: { [key: string]: boolean } = {};
+    currDoors.forEach((d) => {
+      lockedDoorsState[d.color] = d.isLocked;
+    });
+    const isGateOpen = currDoors.every((d) => d.buttonPressed);
+
+    // 1. 교사 플레이어 전용: 주변 of 학생 봇 수동 체포 감지 보강 (벽 유무 확인)
     if (currPlayer.team === "TEACHER" && currPhase === GamePhase.PLAYING) {
       for (const other of currPlayers) {
         if (other.team === "STUDENT" && !other.isCaptured && !other.hasEscaped) {
-          if (getDistance(localX.current, localY.current, other.x, other.y) < 1.45) {
+          if (
+            getDistance(localX.current, localY.current, other.x, other.y) < 1.45 &&
+            !hasWallBetween(localX.current, localY.current, other.x, other.y, lockedDoorsState, isGateOpen)
+          ) {
             setInteractPrompt(`🚨 [E] 접촉 체포: ${other.nickname} 연행 봉쇄하기!`);
             return;
           }
@@ -329,17 +386,25 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
       }
     }
 
-    // 2. 열쇠 수집 범위 조사
+    // 2. 열쇠 수집 범위 조사 (동일하게 벽 유무 체크)
     for (const key of currKeys) {
-      if (!key.isHeld && getDistance(localX.current, localY.current, key.x, key.y) < 1.2) {
+      if (
+        !key.isHeld &&
+        getDistance(localX.current, localY.current, key.x, key.y) < 1.25 &&
+        !hasWallBetween(localX.current, localY.current, key.x, key.y, lockedDoorsState, isGateOpen)
+      ) {
         setInteractPrompt(`[E] 누름: ${key.color} 열쇠 획득`);
         return;
       }
     }
 
-    // 3. 잠긴 교실 자물쇠 해제 조사
+    // 3. 잠긴 교실 자물쇠 해제 조사 (문과의 벽 유무)
     for (const d of currDoors) {
-      if (d.isLocked && getDistance(localX.current, localY.current, d.x, d.y) < 1.5) {
+      if (
+        d.isLocked &&
+        getDistance(localX.current, localY.current, d.x, d.y) < 1.6 &&
+        !hasWallBetween(localX.current, localY.current, d.x, d.y, lockedDoorsState, isGateOpen)
+      ) {
         // 플레이어가 해당 문과 같은 색상의 열쇠를 쥐고 있는지?
         const heldKey = currKeys.find((k) => k.isHeld && k.heldBy === currPlayer.id && k.color === d.color);
         if (heldKey) {
@@ -352,21 +417,30 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
       }
     }
 
-    // 4. 자물쇠 방 버튼 작동 조사
+    // 4. 자물쇠 방 버튼 작동 조사 (벽 유무)
     for (const d of currDoors) {
       if (!d.isLocked && !d.buttonPressed) {
         const clsInfo = CLASSROOMS.find((v) => v.color === d.color);
-        if (clsInfo && getDistance(localX.current, localY.current, clsInfo.buttonX, clsInfo.buttonY) < 1.4) {
+        if (
+          clsInfo &&
+          getDistance(localX.current, localY.current, clsInfo.buttonX, clsInfo.buttonY) < 1.5 &&
+          !hasWallBetween(localX.current, localY.current, clsInfo.buttonX, clsInfo.buttonY, lockedDoorsState, isGateOpen)
+        ) {
           setInteractPrompt(`[E] 누름: ${d.color} 제어 버튼 작동`);
           return;
         }
       }
     }
 
-    // 5. 구출하기 조사 (다른 사람이 감금되어 있는 경우)
+    // 5. 구출하기 조사 (다른 사람이 감금되어 있는 경우, 벽 너머 구출 불가)
     if (currPlayer.team === "STUDENT") {
       for (const other of currPlayers) {
-        if (other.id !== currPlayer.id && other.isCaptured && getDistance(localX.current, localY.current, other.x, other.y) < 1.5) {
+        if (
+          other.id !== currPlayer.id &&
+          other.isCaptured &&
+          getDistance(localX.current, localY.current, other.x, other.y) < 1.6 &&
+          !hasWallBetween(localX.current, localY.current, other.x, other.y, lockedDoorsState, isGateOpen)
+        ) {
           setInteractPrompt(`[E] 길게 누름: ${other.nickname} 구출하기`);
           return;
         }
@@ -1441,20 +1515,46 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
         </button>
       </div>
 
-      <canvas
+          <canvas
             id="fpp-canvas-3d"
             ref={canvasRef}
             width={960}
             height={600}
-            className="w-full h-auto aspect-[3/2] block bg-black cursor-crosshair"
+            tabIndex={0}
+            className="w-full h-auto aspect-[3/2] block bg-black cursor-crosshair outline-none focus:ring-1 focus:ring-blue-500/30"
+            onMouseEnter={(e) => {
+              // 캔버스 마우스 진입 시 마우스 좌표 캐시 초기화 (마우스 이동 시 튐 현상 장벽 구축)
+              lastMouseX.current = e.clientX;
+              lastMouseY.current = e.clientY;
+              // 게임 화면에 마우스가 호버된 동안 키보드 완전 자동 포커싱!
+              try {
+                e.currentTarget.focus();
+                window.focus();
+              } catch (err) {}
+            }}
             onMouseDown={(e) => {
               window.focus(); // 아이프레임 포커스 강제 획득으로 키보드 입력 활성화
+              try {
+                e.currentTarget.focus();
+              } catch (err) {}
               
               // 화면 클릭 시 포인터 고정 요청 (완벽한 1인칭 FPS 모드 제공)
+              const now = Date.now();
+              if (now - lastPointerLockExitTime.current < 1500) {
+                // 이전 포인터 락 해제된 후 브라우저 쿨다운 내에 재잠금 요청하려는 경우 에러 무력화
+                console.warn("Pointer lock cooldown active. Ignoring request.");
+                return;
+              }
+
               try {
                 const canvas = e.currentTarget;
                 if (canvas && document.pointerLockElement !== canvas) {
-                  canvas.requestPointerLock();
+                  const promise = canvas.requestPointerLock() as any;
+                  if (promise && typeof promise.catch === "function") {
+                    promise.catch((err: any) => {
+                      console.warn("Pointer lock request rejected:", err);
+                    });
+                  }
                 }
               } catch (err) {
                 console.warn("Pointer lock request failed:", err);
@@ -1464,8 +1564,27 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
               if (player.isCaptured || player.hasEscaped) return;
               
               const sensitivity = 0.003;
-              const deltaX = e.movementX;
-              const deltaY = e.movementY;
+              let deltaX = 0;
+              let deltaY = 0;
+
+              // 포인터 락 상태라면 movementX, movementY 지원
+              if (document.pointerLockElement === e.currentTarget) {
+                deltaX = e.movementX;
+                deltaY = e.movementY;
+              } else {
+                // 포인터 락 상태가 아니더라도, 클릭 드래그 없이 마우스 이동만으로 부드럽게 화면 이동 가능!
+                if (lastMouseX.current !== 0 || lastMouseY.current !== 0) {
+                  deltaX = e.clientX - lastMouseX.current;
+                  deltaY = e.clientY - lastMouseY.current;
+                }
+                // 급격한 순간이동 방지 (스크린 바깥 이동 후 재진입 시 바이트 보완)
+                if (Math.abs(deltaX) > 120 || Math.abs(deltaY) > 120) {
+                  deltaX = 0;
+                  deltaY = 0;
+                }
+                lastMouseX.current = e.clientX;
+                lastMouseY.current = e.clientY;
+              }
               
               // 드래그 상태 확인 없이 부드럽게 마우스 움직임만으로 시선 조절
               const nextAngle = localAngle.current + deltaX * sensitivity;
@@ -1475,6 +1594,9 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
               throttledSendMove(localX.current, localY.current, nextAngle);
             }}
             onMouseLeave={() => {
+              // 캔버스 이탈 시 마우스 잔존 위치 리셋
+              lastMouseX.current = 0;
+              lastMouseY.current = 0;
               onMoveRef.current(localX.current, localY.current, localAngle.current);
             }}
           />
