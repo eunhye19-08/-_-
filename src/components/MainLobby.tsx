@@ -244,12 +244,27 @@ export const MainLobby: React.FC<MainLobbyProps> = ({
         body: JSON.stringify(body),
       });
 
-      const data = await resp.json();
+      const contentType = resp.headers.get("content-type");
+      const isJson = contentType && contentType.includes("application/json");
+
       if (!resp.ok) {
-        setAuthError(data.error || "인증 처리 실패");
+        let errMsg = "인증 처리 실패";
+        if (isJson) {
+          const data = await resp.json();
+          errMsg = data.error || errMsg;
+        } else {
+          errMsg = `서버 연결 오류 (${resp.status}): 서버가 준비 중이거나 존재하지 않는 경로입니다. 잠시 후 다시 시도해보십시오.`;
+        }
+        setAuthError(errMsg);
         return;
       }
 
+      if (!isJson) {
+        setAuthError("서버 응답 오류 (JSON이 아닌 형식 수신): " + resp.statusText);
+        return;
+      }
+
+      const data = await resp.json();
       if (data.success && data.profile) {
         setAuthSuccess(isRegisterMode ? "회원가입이 완료되었습니다! 로그인 정보로 로그인합니다." : "성공적으로 로그인되었습니다!");
         localStorage.setItem("weak_hero_user", JSON.stringify(data.profile));

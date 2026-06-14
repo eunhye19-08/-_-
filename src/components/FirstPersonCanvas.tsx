@@ -219,12 +219,10 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
         let nextX = localX.current;
         let nextY = localY.current;
         let nextAngle = localAngle.current;
-
-        // Shift 키가 함께 눌렸으면 A/D는 스트레이프(옆걸음질)를 수행하고, Shift가 없으면 A/D는 시선 회전을 수행합니다!
-        const isShiftPressed = keysPressed.current["shift"];
         let dx = 0;
         let dy = 0;
 
+        // 화살표 좌우 키는 항상 카메라 회전
         if (keysPressed.current["arrowleft"]) {
           nextAngle -= rotSpeed;
           moved = true;
@@ -233,26 +231,17 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
           nextAngle += rotSpeed;
           moved = true;
         }
+
+        // A 키는 항상 좌측으로 게걸음(스트레이프) 이동
         if (keysPressed.current["a"]) {
-          if (isShiftPressed) {
-            // 좌측 슬라이드 이동 (스트레이프)
-            dx += Math.cos(localAngle.current - Math.PI / 2) * moveSpeed;
-            dy += Math.sin(localAngle.current - Math.PI / 2) * moveSpeed;
-          } else {
-            // 왼쪽 시선 회전
-            nextAngle -= rotSpeed;
-          }
+          dx += Math.cos(localAngle.current - Math.PI / 2) * moveSpeed;
+          dy += Math.sin(localAngle.current - Math.PI / 2) * moveSpeed;
           moved = true;
         }
+        // D 키는 항상 우측으로 게걸음(스트레이프) 이동
         if (keysPressed.current["d"]) {
-          if (isShiftPressed) {
-            // 우측 슬라이드 이동 (스트레이프)
-            dx += Math.cos(localAngle.current + Math.PI / 2) * moveSpeed;
-            dy += Math.sin(localAngle.current + Math.PI / 2) * moveSpeed;
-          } else {
-            // 오른쪽 시선 회전
-            nextAngle += rotSpeed;
-          }
+          dx += Math.cos(localAngle.current + Math.PI / 2) * moveSpeed;
+          dy += Math.sin(localAngle.current + Math.PI / 2) * moveSpeed;
           moved = true;
         }
 
@@ -387,51 +376,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
     setInteractPrompt(null);
   };
 
-  // 1인칭 수동 컨트롤 버튼 헬퍼
-  const handleVirtualMovement = (dir: "F" | "B" | "L" | "R" | "I" | "S") => {
-    if (player.isCaptured || player.hasEscaped) return;
 
-    let nextX = localX.current;
-    let nextY = localY.current;
-    let nextAngle = localAngle.current;
-    const step = 0.5;
-
-    if (dir === "L") {
-      nextAngle -= 0.35;
-    } else if (dir === "R") {
-      nextAngle += 0.35;
-    } else {
-      let dx = 0;
-      let dy = 0;
-      if (dir === "F") {
-        dx = Math.cos(localAngle.current) * step;
-        dy = Math.sin(localAngle.current) * step;
-      } else if (dir === "B") {
-        dx = -Math.cos(localAngle.current) * step;
-        dy = -Math.sin(localAngle.current) * step;
-      }
-
-      const lockedDoorsState: { [key: string]: boolean } = {};
-      doors.forEach((d) => {
-        lockedDoorsState[d.color] = d.isLocked;
-      });
-      const colResult = checkCollision(
-        localX.current,
-        localY.current,
-        localX.current + dx,
-        localY.current + dy,
-        lockedDoorsState,
-        doors.every((d) => d.buttonPressed)
-      );
-      nextX = colResult.x;
-      nextY = colResult.y;
-    }
-
-    localX.current = nextX;
-    localY.current = nextY;
-    localAngle.current = nextAngle;
-    onMove(nextX, nextY, nextAngle);
-  };
 
   // ==========================================
   // RAYCASTER 3D CANVAS RENDERING
@@ -1501,33 +1446,35 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
             ref={canvasRef}
             width={960}
             height={600}
-            className="w-full h-auto aspect-[3/2] block bg-black cursor-grab active:cursor-grabbing"
+            className="w-full h-auto aspect-[3/2] block bg-black cursor-crosshair"
             onMouseDown={(e) => {
               window.focus(); // 아이프레임 포커스 강제 획득으로 키보드 입력 활성화
-              isDragging.current = true;
-              lastMouseX.current = e.clientX;
-              lastMouseY.current = e.clientY;
+              
+              // 화면 클릭 시 포인터 고정 요청 (완벽한 1인칭 FPS 모드 제공)
+              try {
+                const canvas = e.currentTarget;
+                if (canvas && document.pointerLockElement !== canvas) {
+                  canvas.requestPointerLock();
+                }
+              } catch (err) {
+                console.warn("Pointer lock request failed:", err);
+              }
             }}
             onMouseMove={(e) => {
-              if (!isDragging.current || player.isCaptured || player.hasEscaped) return;
-              const deltaX = e.clientX - lastMouseX.current;
-              const deltaY = e.clientY - lastMouseY.current;
-              lastMouseX.current = e.clientX;
-              lastMouseY.current = e.clientY;
-
-              const sensitivity = 0.005;
+              if (player.isCaptured || player.hasEscaped) return;
+              
+              const sensitivity = 0.003;
+              const deltaX = e.movementX;
+              const deltaY = e.movementY;
+              
+              // 드래그 상태 확인 없이 부드럽게 마우스 움직임만으로 시선 조절
               const nextAngle = localAngle.current + deltaX * sensitivity;
-              cameraPitch.current = Math.max(-150, Math.min(150, cameraPitch.current - deltaY * 0.9));
+              cameraPitch.current = Math.max(-150, Math.min(150, cameraPitch.current - deltaY * 1.5));
 
               localAngle.current = nextAngle;
               throttledSendMove(localX.current, localY.current, nextAngle);
             }}
-            onMouseUp={() => {
-              isDragging.current = false;
-              onMoveRef.current(localX.current, localY.current, localAngle.current);
-            }}
             onMouseLeave={() => {
-              isDragging.current = false;
               onMoveRef.current(localX.current, localY.current, localAngle.current);
             }}
           />
@@ -1549,52 +1496,6 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
                 🔴교사 접근 경보 작동
               </span>
             )}
-          </div>
-
-          {/* 좌측 하단 버추얼 십자패드 컨트롤러 */}
-          <div className="absolute bottom-4 left-4 z-20 bg-slate-950/85 backdrop-blur-md border border-slate-800 rounded-xl p-2 flex flex-col justify-center items-center shadow-2xl pointer-events-auto select-none sm:bottom-6 sm:left-6">
-            {/* 십자키 레이아웃 */}
-            <div className="grid grid-cols-3 gap-1 justify-center items-center">
-              <div />
-              <button
-                id="joystick-up"
-                type="button"
-                onClick={() => handleVirtualMovement("F")}
-                className="w-7 h-7 bg-slate-900 border border-slate-800 hover:bg-slate-850 text-white active:scale-95 rounded flex items-center justify-center font-bold text-[10px]"
-                title="전진"
-              >
-                ▲
-              </button>
-              <div />
-
-              <button
-                id="joystick-left"
-                type="button"
-                onClick={() => handleVirtualMovement("L")}
-                className="w-7 h-7 bg-slate-900 border border-slate-800 hover:bg-slate-850 text-white active:scale-95 rounded flex items-center justify-center font-bold text-[10px]"
-                title="좌회전"
-              >
-                ◀
-              </button>
-              <button
-                id="joystick-down"
-                type="button"
-                onClick={() => handleVirtualMovement("B")}
-                className="w-7 h-7 bg-slate-900 border border-slate-800 hover:bg-slate-850 text-white active:scale-95 rounded flex items-center justify-center font-bold text-[10px]"
-                title="후진"
-              >
-                ▼
-              </button>
-              <button
-                id="joystick-right"
-                type="button"
-                onClick={() => handleVirtualMovement("R")}
-                className="w-7 h-7 bg-slate-900 border border-slate-800 hover:bg-slate-850 text-white active:scale-95 rounded flex items-center justify-center font-bold text-[10px]"
-                title="우회전"
-              >
-                ▶
-              </button>
-            </div>
           </div>
 
           {/* 조작 가이드 HUD Overlay */}
@@ -1619,7 +1520,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
                 </div>
                 <div className="flex items-center justify-between gap-4">
                   <span className="text-slate-400">시선 회전</span>
-                  <span className="bg-slate-900 border border-slate-800 text-slate-300 px-1 py-0.5 rounded font-mono text-[9px]">드래그 / 클릭</span>
+                  <span className="bg-slate-900 border border-slate-800 text-slate-300 px-1 py-0.5 rounded font-mono text-[9px]">마우스 이동 (클릭 고정, ESC 해제)</span>
                 </div>
                 <div className="flex items-center justify-between gap-4">
                   <span className="text-slate-400">상호작용</span>
