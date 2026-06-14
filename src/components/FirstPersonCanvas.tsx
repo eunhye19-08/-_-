@@ -149,6 +149,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
 
     const getUnifiedKey = (e: KeyboardEvent): string => {
       const code = e.code;
+      if (code === "ShiftLeft" || code === "ShiftRight") return "shift";
       if (code === "KeyW" || code === "ArrowUp") return "w";
       if (code === "KeyS" || code === "ArrowDown") return "s";
       if (code === "KeyA") return "a";
@@ -159,6 +160,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
       if (code === "ArrowRight") return "arrowright";
       
       const rawK = e.key.toLowerCase();
+      if (rawK === "shift") return "shift";
       return normalizeKey(rawK);
     };
 
@@ -218,7 +220,11 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
         let nextY = localY.current;
         let nextAngle = localAngle.current;
 
-        // 회전 (방향키 좌우는 시선 회전으로 보조 유지!)
+        // Shift 키가 함께 눌렸으면 A/D는 스트레이프(옆걸음질)를 수행하고, Shift가 없으면 A/D는 시선 회전을 수행합니다!
+        const isShiftPressed = keysPressed.current["shift"];
+        let dx = 0;
+        let dy = 0;
+
         if (keysPressed.current["arrowleft"]) {
           nextAngle -= rotSpeed;
           moved = true;
@@ -227,10 +233,30 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
           nextAngle += rotSpeed;
           moved = true;
         }
+        if (keysPressed.current["a"]) {
+          if (isShiftPressed) {
+            // 좌측 슬라이드 이동 (스트레이프)
+            dx += Math.cos(localAngle.current - Math.PI / 2) * moveSpeed;
+            dy += Math.sin(localAngle.current - Math.PI / 2) * moveSpeed;
+          } else {
+            // 왼쪽 시선 회전
+            nextAngle -= rotSpeed;
+          }
+          moved = true;
+        }
+        if (keysPressed.current["d"]) {
+          if (isShiftPressed) {
+            // 우측 슬라이드 이동 (스트레이프)
+            dx += Math.cos(localAngle.current + Math.PI / 2) * moveSpeed;
+            dy += Math.sin(localAngle.current + Math.PI / 2) * moveSpeed;
+          } else {
+            // 오른쪽 시선 회전
+            nextAngle += rotSpeed;
+          }
+          moved = true;
+        }
 
-        // 전진/후진 (W, S) 및 좌/우 슬라이드 측면 이동 (A, D)
-        let dx = 0;
-        let dy = 0;
+        // 전진/후진 (W, S)
         if (keysPressed.current["w"] || keysPressed.current["arrowup"]) {
           dx += Math.cos(localAngle.current) * moveSpeed;
           dy += Math.sin(localAngle.current) * moveSpeed;
@@ -239,18 +265,6 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
         if (keysPressed.current["s"] || keysPressed.current["arrowdown"]) {
           dx -= Math.cos(localAngle.current) * moveSpeed;
           dy -= Math.sin(localAngle.current) * moveSpeed;
-          moved = true;
-        }
-        if (keysPressed.current["a"]) {
-          // 좌측 슬라이드 이동 (스트레이프)
-          dx += Math.cos(localAngle.current - Math.PI / 2) * moveSpeed;
-          dy += Math.sin(localAngle.current - Math.PI / 2) * moveSpeed;
-          moved = true;
-        }
-        if (keysPressed.current["d"]) {
-          // 우측 슬라이드 이동 (스트레이프)
-          dx += Math.cos(localAngle.current + Math.PI / 2) * moveSpeed;
-          dy += Math.sin(localAngle.current + Math.PI / 2) * moveSpeed;
           moved = true;
         }
 
@@ -679,7 +693,8 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
       isCaptured: boolean,
       a: number,
       isMoving: boolean = false,
-      charImg?: HTMLImageElement | null
+      charImg?: HTMLImageElement | null,
+      facingDir: string = "FRONT"
     ) => {
       c.save();
       c.translate(cx, cy);
@@ -721,8 +736,8 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
         ctx.closePath();
         ctx.fill();
 
-        // 머리 얼굴 부분에 사용자가 올린 오리지널 사진 실사 텍스처 투사!
-        if (faceImg && faceImg.complete && faceImg.width > 0) {
+        // 머리 얼굴 부분에 사용자가 올린 오리지널 사진 실사 텍스처 투사! (FRONT 일 때만 머리 전면에 텍스처 투사)
+        if (facingDir === "FRONT" && faceImg && faceImg.complete && faceImg.width > 0) {
           ctx.save();
           // 원본 사진을 회전하거나 변형하지 않고, 박스 전면에 딱 맞게 드로잉!
           ctx.drawImage(faceImg, x + 1.5, y + 1.5, w - 3, h - 3);
@@ -774,18 +789,19 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
       // 3. 바디 교복 상의 (Uniform Blazer 3D 블록)
       drawRobloxBox(c, torsoX, torsoY, torsoW, torsoH, torsoD, jacketColor);
 
-      // 교복 셔츠 V존 데코레이션
-      c.fillStyle = "#f8fafc";
-      c.beginPath();
-      c.moveTo(torsoX + torsoW * 0.35, torsoY);
-      c.lineTo(torsoX + torsoW * 0.65, torsoY);
-      c.lineTo(torsoX + torsoW * 0.5, torsoY + torsoH * 0.25);
-      c.closePath();
-      c.fill();
+      // 교복 셔츠 V존 및 넥타이 붉은색 데코레이션 (FRONT 일 때만 그림)
+      if (facingDir === "FRONT") {
+        c.fillStyle = "#f8fafc";
+        c.beginPath();
+        c.moveTo(torsoX + torsoW * 0.35, torsoY);
+        c.lineTo(torsoX + torsoW * 0.65, torsoY);
+        c.lineTo(torsoX + torsoW * 0.5, torsoY + torsoH * 0.25);
+        c.closePath();
+        c.fill();
 
-      // 넥타이 붉은색 포인트
-      c.fillStyle = team === "TEACHER" ? "#ef4444" : "#c2410c";
-      c.fillRect(torsoX + torsoW * 0.46, torsoY, torsoW * 0.08, torsoH * 0.4);
+        c.fillStyle = team === "TEACHER" ? "#ef4444" : "#c2410c";
+        c.fillRect(torsoX + torsoW * 0.46, torsoY, torsoW * 0.08, torsoH * 0.4);
+      }
 
       // 4. 관절형 양팔 렌더 (앞뒤 교차 스윙)
       // (A) 왼쪽 팔 블록
@@ -814,7 +830,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
       }
       
       // 기저 머리 렌더링. 사용자가 올린 오리지널 이미지가 있을 경우 변형/왜곡/머리 덮개 없이 원본 그대로 노출, 없을 경우에만 레고/로블록스형 블록머리로 폴백.
-      if (charImg && charImg.complete && charImg.width > 0) {
+      if (charImg && charImg.complete && charImg.width > 0 && facingDir === "FRONT") {
         c.drawImage(charImg, -headW / 2, -headH / 2, headW, headH);
       } else {
         drawRobloxBox(c, -headW / 2, -headH / 2, headW, headH, headD, "#fdba74");
@@ -828,19 +844,28 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
         else if (roleName === "고현탁") hairColor = "#1e293b";
         else if (team === "TEACHER") hairColor = "#0f172a";
 
-        // 앞머리 (Top hair block) 과 옆머리(Sides) 복스화
-        drawRobloxBox(c, -headW * 0.53, -headH * 0.62, headW * 1.06, headH * 0.20, headD * 1.1, hairColor);
-        drawRobloxBox(c, -headW * 0.55, -headH * 0.45, headW * 0.15, headH * 0.70, headD * 1.05, hairColor);
-        drawRobloxBox(c, headW * 0.40, -headH * 0.45, headW * 0.15, headH * 0.70, headD * 1.05, hairColor);
+        if (facingDir === "FRONT") {
+          // 앞머리 과 옆머리 복스화
+          drawRobloxBox(c, -headW * 0.53, -headH * 0.62, headW * 1.06, headH * 0.20, headD * 1.1, hairColor);
+          drawRobloxBox(c, -headW * 0.55, -headH * 0.45, headW * 0.15, headH * 0.70, headD * 1.05, hairColor);
+          drawRobloxBox(c, headW * 0.40, -headH * 0.45, headW * 0.15, headH * 0.70, headD * 1.05, hairColor);
 
-        // 안경 등 세부 기믹
-        if (roleName === "연시은" || team === "TEACHER") {
-          c.strokeStyle = "rgba(255, 255, 255, 0.9)";
-          c.lineWidth = 1.8;
-          c.beginPath();
-          c.arc(-headW * 0.22, 0, headW * 0.18, 0, 2 * Math.PI);
-          c.arc(headW * 0.22, 0, headW * 0.18, 0, 2 * Math.PI);
-          c.stroke();
+          // 안경 등 세부 기믹
+          if (roleName === "연시은" || team === "TEACHER") {
+            c.strokeStyle = "rgba(255, 255, 255, 0.9)";
+            c.lineWidth = 1.8;
+            c.beginPath();
+            c.arc(-headW * 0.22, 0, headW * 0.18, 0, 2 * Math.PI);
+            c.arc(headW * 0.22, 0, headW * 0.18, 0, 2 * Math.PI);
+            c.stroke();
+          }
+        } else if (facingDir === "BACK") {
+          // 뒷부분 머리: 뒷머리가 머리통을 거의 다 덮음!
+          drawRobloxBox(c, -headW * 0.55, -headH * 0.65, headW * 1.1, headH * 1.25, headD * 1.15, hairColor);
+        } else {
+          // SIDE profile (LEFT or RIGHT): 옆면 머리
+          drawRobloxBox(c, -headW * 0.55, -headH * 0.65, headW * 0.8, headH * 1.2, headD * 1.15, hairColor);
+          drawRobloxBox(c, -headW * 0.1, -headH * 0.1, headW * 0.2, headH * 0.4, headD * 1.1, "#fdba74");
         }
       }
 
@@ -1017,6 +1042,22 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
           const cx = boxWidth / 2;
           const cy = boxHeight * 0.58;
 
+          // 상대적 각도에 입각해 뒤/앞/옆모습 3차원 투사면 선정!
+          let relAngle = (spr as any).angle - Math.atan2(spr.dy, spr.dx);
+          relAngle = Math.atan2(Math.sin(relAngle), Math.cos(relAngle));
+          
+          let facingDir: 'FRONT' | 'BACK' | 'LEFT' | 'RIGHT' = 'FRONT';
+          const absAngle = Math.abs(relAngle);
+          if (absAngle < Math.PI / 4) {
+            facingDir = 'BACK'; // 후면 투사
+          } else if (absAngle > 3 * Math.PI / 4) {
+            facingDir = 'FRONT'; // 전면 투사
+          } else if (relAngle > 0) {
+            facingDir = 'RIGHT'; // 우측면
+          } else {
+            facingDir = 'LEFT'; // 좌측면
+          }
+
           // 오프스크린에 3D 캐릭터 소환
           draw3DHumanCharacter(
             oCtx,
@@ -1030,7 +1071,8 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
             isCapt,
             1.0,
             (spr as any).isMoving,
-            charImg
+            charImg,
+            facingDir
           );
 
           // 오프스크린에 명찰 배치 그리기

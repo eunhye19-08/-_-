@@ -570,6 +570,7 @@ export default function App() {
   // ==========================================
   useEffect(() => {
     if (phase !== GamePhase.PLAYING && phase !== GamePhase.READY_TIME) return;
+    if (!isLeader) return; // Only host/leader runs AI intelligence authoritative logic!
 
     const aiInterval = setInterval(() => {
       setPlayers((prevPlayers) => {
@@ -853,7 +854,7 @@ export default function App() {
     }, 110); // 110ms 마다 틱 진행
 
     return () => clearInterval(aiInterval);
-  }, [phase, keys, doors]);
+  }, [phase, keys, doors, isLeader]);
 
   // ==========================================
   // IN-GAME ACTION LOGIC HANDLERS

@@ -639,7 +639,18 @@ app.post("/api/rooms/:code/update", (req, res) => {
 
   // Host updates the rest of authoritative elements
   if (playerId === room.hostId) {
-    if (bots) room.bots = bots;
+    if (bots) {
+      room.bots = bots;
+      if (Array.isArray(bots)) {
+        bots.forEach((b: any) => {
+          room.players[b.id] = {
+            ...room.players[b.id],
+            ...b,
+            lastActive: Date.now()
+          };
+        });
+      }
+    }
     if (keys) room.keys = keys;
     if (doors) room.doors = doors;
     if (phase) room.phase = phase;
