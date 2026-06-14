@@ -1503,6 +1503,7 @@ export const FirstPersonCanvas: React.FC<FirstPersonCanvasProps> = ({
             height={600}
             className="w-full h-auto aspect-[3/2] block bg-black cursor-grab active:cursor-grabbing"
             onMouseDown={(e) => {
+              window.focus(); // 아이프레임 포커스 강제 획득으로 키보드 입력 활성화
               isDragging.current = true;
               lastMouseX.current = e.clientX;
               lastMouseY.current = e.clientY;
